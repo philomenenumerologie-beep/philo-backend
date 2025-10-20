@@ -1,42 +1,53 @@
 import express from "express";
 import cors from "cors";
-import bodyParser from "body-parser";
 import OpenAI from "openai";
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json()); // pas besoin de body-parser
 
-// 🔑 Création du client OpenAI
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY, // clé ajoutée dans Render
-});
+// 🔑 Client OpenAI (ne cassera pas si la clé manque)
+const openai = process.env.OPENAI_API_KEY ? new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+}) : null;
 
-// 🔮 Route principale (test rapide)
+// 🩺 Santé / test
 app.get("/", (req, res) => {
-  res.send("✅ Philo Backend en ligne et prêt à répondre !");
+  res.send("✅ Philo Backend en ligne");
 });
 
-// 🧠 Route IA
+// 🤖 Route IA
 app.post("/ask", async (req, res) => {
   try {
-    const { question } = req.body;
+    const { question } = req.body || {};
+    if (!question) {
+      return res.status(400).json({ error: "Champ 'question' manquant" });
+    }
 
-    const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini", // modèle léger, parfait pour ton IA
+    // Si pas de clé => réponse locale de secours
+    if (!openai) {
+      return res.json({
+        answer: "Backend OK (mode démo). Ajoute OPENAI_API_KEY sur Render pour activer l’IA.",
+      });
+    }
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: "Tu es l’IA de Philomenia, spirituelle et bienveillante." },
-        { role: "user", content: question },
-      ],
+        { role: "system", content: "Tu es une IA de Philomenia, concise et utile." },
+        { role: "user", content: question }
+      ]
     });
 
     res.json({ answer: completion.choices[0].message.content });
-  } catch (error) {
-    console.error("Erreur :", error);
-    res.status(500).json({ error: "Erreur de l’Oracle." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
-// 🚀 Démarrage du serveur
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Serveur Philo en ligne sur le port ${PORT}`));
+// ✅ Render fournit PORT
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 Backend démarré sur port ${PORT}`);
+});
