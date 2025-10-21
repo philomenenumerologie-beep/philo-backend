@@ -4,55 +4,72 @@ import cors from "cors";
 import OpenAI from "openai";
 
 const app = express();
-app.use(cors());                 // autorise tes pages statiques à appeler l’API
+app.use(cors());
 app.use(express.json());
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ✨ Prompts “personnalités” par domaine
 const SYSTEM_PROMPTS = {
-  societe: `Tu es "Philomène Société" : une IA de conversation moderne, claire et nuancée.
-Parle d'environnement, éducation, économie, numérique, justice, politique et éthique.
-Réponds en français, ton empathique, concis au début, et détaillé si on insiste.
-Ne donne pas d'avis tranché sans expliquer les limites et les sources possibles.`,
+  societe: `Tu es "Philomène Société" : une IA de vulgarisation sociale et environnementale. 
+Parle d'environnement, d'éducation, d'économie, de numérique et de citoyenneté.
+Réponds en français, avec empathie, concision et neutralité.`,
+  
+  oracle: `Tu es "Philomène Oracle" : une IA de réflexion et de conseils pratiques. 
+Aide à prendre des décisions avec clarté, bienveillance et logique.
+Pas d’ésotérisme, mais une sagesse concrète et pragmatique.`,
 
-  oracle: `Tu es "Philomène Oracle" : style coach de vie bienveillant, métaphores, questions guidées.
-Pas d'ésotérisme factuel, reste dans le symbolique et l'introspection.`,
+  culture: `Tu es "Philomène Culture" : une IA qui vulgarise la culture, les arts, l’histoire et la société. 
+Répond avec enthousiasme et curiosité. Donne des pistes de lecture, de films ou d’artistes.`,
 
-  culture: `Tu es "Philomène Culture" : vulgarisation claire, références (livres, films, arts),
-propose des pistes à lire/voir/écouter. Cite les influences (sans liens).`,
-
-  sport: `Tu es "Philomène Analyste Sportif" : analyses techniques, stratégies, préparation mentale.
-Reste factuel, pédagogique, et adapte au niveau de la personne.`
+  sport: `Tu es "Philomène Analyste Sportif" : une IA d’analyse et de pédagogie du sport. 
+Explique les stratégies, la préparation mentale, les statistiques et la culture sportive.`
 };
 
-// Route unique pour discuter avec n’importe quel domaine
-app.post("/api/chat", async (req, res) => {
+// 🌐 Middleware CORS manuel (plus fiable)
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
+// 🚀 Route unique multi-domaines
+app.post("/ask/:bot", async (req, res) => {
   try {
-    const { domain = "societe", messages = [] } = req.body;
+    const bot = req.params.bot?.toLowerCase();
+    const question = req.body.question?.trim();
 
-    const system = SYSTEM_PROMPTS[domain] ?? SYSTEM_PROMPTS.societe;
+    if (!bot || !SYSTEM_PROMPTS[bot]) {
+      return res.status(400).json({ error: "Bot inconnu ou manquant." });
+    }
+    if (!question) {
+      return res.status(400).json({ error: "Question vide." });
+    }
 
+    const system = SYSTEM_PROMPTS[bot];
     const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",                 // rapide + économique
+      model: "gpt-4o-mini",
       messages: [
         { role: "system", content: system },
-        ...messages
+        { role: "user", content: question }
       ],
       temperature: 0.7,
-      max_tokens: 700
+      max_tokens: 500
     });
 
-    const reply = completion.choices[0]?.message?.content ?? "…";
-    res.json({ reply });
+    const answer = completion.choices?.[0]?.message?.content || "Je n’ai pas pu répondre.";
+    res.json({ answer });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "AI_ERROR", detail: err?.message });
+    console.error("AI Error:", err.message);
+    res.status(500).json({ error: "AI_ERROR", detail: err.message });
   }
 });
 
-// Healthcheck (déjà utilisé par Render)
+// ✅ Healthcheck
 app.get("/healthz", (_, res) => res.status(200).send("ok"));
 
+// 🚀 Démarrage
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Philomène backend prêt sur " + PORT));
+app.listen(PORT, () => console.log(`✅ Backend Philomène prêt sur le port ${PORT}`));
