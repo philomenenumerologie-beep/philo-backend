@@ -4,57 +4,55 @@ import cors from "cors";
 import OpenAI from "openai";
 
 const app = express();
-app.use(cors());
+app.use(cors());                 // autorise tes pages statiques à appeler l’API
 app.use(express.json());
 
-// 🔑 OpenAI (clé à mettre sur Render)
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// 🧠 Profils (prompts) par IA
-const IA_PROFILES = {
-  oracle: "Tu es Philoménia – Oracle : guidance bienveillante, concise, actionable (3–5 points max).",
-  sport: "Tu es Philoménia – Analyste Sportif : Contexte, Clés tactiques (3–5 puces), Tendance prudente.",
-  culture: "Tu es Philoménia – Culture : 1 idée centrale, 3 bullet points utiles, 1 piste pour aller plus loin.",
-  flash: "Tu es Philoménia – Flash Info : 3 bullets ultra concis et actionnables."
+// ✨ Prompts “personnalités” par domaine
+const SYSTEM_PROMPTS = {
+  societe: `Tu es "Philomène Société" : une IA de conversation moderne, claire et nuancée.
+Parle d'environnement, éducation, économie, numérique, justice, politique et éthique.
+Réponds en français, ton empathique, concis au début, et détaillé si on insiste.
+Ne donne pas d'avis tranché sans expliquer les limites et les sources possibles.`,
+
+  oracle: `Tu es "Philomène Oracle" : style coach de vie bienveillant, métaphores, questions guidées.
+Pas d'ésotérisme factuel, reste dans le symbolique et l'introspection.`,
+
+  culture: `Tu es "Philomène Culture" : vulgarisation claire, références (livres, films, arts),
+propose des pistes à lire/voir/écouter. Cite les influences (sans liens).`,
+
+  sport: `Tu es "Philomène Analyste Sportif" : analyses techniques, stratégies, préparation mentale.
+Reste factuel, pédagogique, et adapte au niveau de la personne.`
 };
 
-// 🧭 Route principale
-app.get("/", (_req, res) => {
-  res.send("✅ Philo Backend en ligne");
-});
-
-// 💬 Route d'IA principale
-app.post("/ask", async (req, res) => {
+// Route unique pour discuter avec n’importe quel domaine
+app.post("/api/chat", async (req, res) => {
   try {
-    const question = (req.body?.question || "").slice(0, 2000);
-    const ia = (req.body?.ia || "oracle").toLowerCase();
+    const { domain = "societe", messages = [] } = req.body;
 
-    if (!question) {
-      return res.status(400).json({ error: "Question manquante" });
-    }
+    const system = SYSTEM_PROMPTS[domain] ?? SYSTEM_PROMPTS.societe;
 
-    const system = IA_PROFILES[ia] || "Tu es Philoménia, utile et concise.";
-
-    const chat = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.6,
+    const completion = await client.chat.completions.create({
+      model: "gpt-4o-mini",                 // rapide + économique
       messages: [
         { role: "system", content: system },
-        { role: "user", content: question }
-      ]
+        ...messages
+      ],
+      temperature: 0.7,
+      max_tokens: 700
     });
 
-    const answer = chat.choices?.[0]?.message?.content?.trim() || "(pas de réponse)";
-    res.json({ answer });
-
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Erreur serveur" });
+    const reply = completion.choices[0]?.message?.content ?? "…";
+    res.json({ reply });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "AI_ERROR", detail: err?.message });
   }
 });
 
-// 🚀 Lancer le serveur
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Backend lancé sur port ${PORT}`));
+// Healthcheck (déjà utilisé par Render)
+app.get("/healthz", (_, res) => res.status(200).send("ok"));
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Philomène backend prêt sur " + PORT));
