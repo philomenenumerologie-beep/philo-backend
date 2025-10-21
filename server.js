@@ -7,39 +7,43 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ⚙️ Client OpenAI (clé à mettre dans Render: OPENAI_API_KEY)
+// 🔐 OpenAI (clé à mettre sur Render : OPENAI_API_KEY)
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Ping de santé (permet à Render de voir que l'app tourne)
-app.get("/", (_req, res) => {
-  res.send("✅ Philo Backend en ligne");
-});
+// 🎛️ Profils (prompts) par IA
+const IA_PROFILES = {
+  oracle:  "Tu es Philoménia – Oracle : guidance bienveillante, concise, actionable (3–5 points max). Reste prudente.",
+  sport:   "Tu es Philoménia – Analyste Sportif : Contexte, Clés tactiques (3–5 puces), Tendance prudente. Pas de stats inventées.",
+  culture: "Tu es Philoménia – Culture : 1 idée centrale, 3 bullet points utiles, 1 piste pour aller plus loin.",
+  flash:   "Tu es Philoménia – Flash Info : 3 bullets ultra concis, actionnables, sans blabla."
+};
 
-// Route IA
+app.get("/", (_req, res) => res.send("✅ Philo Backend en ligne"));
+
 app.post("/ask", async (req, res) => {
   try {
-    const { question } = req.body ?? {};
-    if (!question) return res.status(400).json({ error: "Paramètre 'question' manquant" });
+    const question = (req.body?.question || "").slice(0, 2000);
+    const ia = (req.body?.ia || "oracle").toLowerCase();
+    if (!question) return res.status(400).json({ error: "Question manquante" });
 
-    const completion = await openai.chat.completions.create({
+    const system = IA_PROFILES[ia] || "Tu es Philoménia, utile et concise.";
+
+    const chat = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.7,
+      temperature: 0.6,
       messages: [
-        { role: "system", content: "Tu es l’IA de Philomenia, claire et utile." },
+        { role: "system", content: system },
         { role: "user", content: question }
       ]
     });
 
-    const answer = completion.choices?.[0]?.message?.content ?? "Aucune réponse.";
+    const answer = chat.choices?.[0]?.message?.content?.trim() || "(pas de réponse)";
     res.json({ answer });
-  } catch (err) {
-    console.error("AI error:", err);
-    res.status(500).json({ error: "Erreur serveur", detail: String(err.message || err) });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
-// Render injecte PORT — on l’utilise impérativement
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server listening on :${PORT}`);
-});
+app.listen(PORT, () => console.log("🚀 Backend sur port", PORT));
