@@ -31,7 +31,32 @@ app.post("/api/chat", async (req, res) => {
     const { plan = "mini", messages = [] } = req.body || {};
     // Plan → modèle
     const model = plan === "pro" ? "gpt-4o" : "gpt-4o-mini";
+const model = plan === "pro" ? "gpt-4o" : "gpt-4o-mini";
 
+// 🔍 Vérifie si la question parle d'actualités
+const lastUserMessage = messages[messages.length - 1]?.content?.toLowerCase() || "";
+
+if (
+  lastUserMessage.includes("actualité") ||
+  lastUserMessage.includes("résultat") ||
+  lastUserMessage.includes("aujourd'hui") ||
+  lastUserMessage.includes("ce soir")
+) {
+  const query = encodeURIComponent(lastUserMessage);
+  const newsResponse = await fetch(
+    `https://newsapi.org/v2/everything?q=${query}&language=fr&sortBy=publishedAt&pageSize=3&apiKey=${process.env.NEWSAPI_KEY}`
+  );
+  const newsData = await newsResponse.json();
+
+  if (newsData.articles?.length > 0) {
+    const headlines = newsData.articles
+      .map(a => `🗞️ ${a.title} — ${a.source.name}`)
+      .join("\n\n");
+    return res.json({ reply: `Voici les dernières actualités :\n\n${headlines}` });
+  } else {
+    return res.json({ reply: "Je n’ai trouvé aucune actualité récente sur ce sujet." });
+  }
+}
     // Transforme l’historique en messages OpenAI (support image)
     // Chaque tour : si image présente, on envoie un "content" mixte (texte + image)
     const formatted = [];
