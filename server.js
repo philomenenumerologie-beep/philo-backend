@@ -7,90 +7,65 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "5mb" }));
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Configuration OpenAI
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-// 🧠 Personnalité générale
+// 🧠 Personnalité de Philomene GPT
 const SYSTEM_PROMPT = `
-Tu es "Philomene GPT", un assistant français.
+Tu es "Philomene GPT", un assistant français clair et bienveillant.
 Règles :
-– Réponds en français, simplement, avec des explications claires.
-– Donne des exemples concrets.
+– Réponds en français, simplement, avec des explications concrètes.
+– Donne des exemples précis si c’est utile.
 – Pas d’affirmations non étayées.
 – Si on te demande un résumé, rends-le actionnable et synthétique.
 `;
 
-// 🧩 Utilitaires pour images envoyées en Data URL
-function dataUrlToImageContent(dataUrl){
+// 🧩 Fonction pour transformer les images envoyées
+function dataUrlToImageContent(dataUrl) {
   if (!dataUrl) return null;
-  // OpenAI image input = { type:"image_url", image_url:{ url:"data:image/png;base64,..." } }
   return { type: "image_url", image_url: { url: dataUrl } };
 }
 
+// 🚀 Route principale : chat
 app.post("/api/chat", async (req, res) => {
   try {
-    const { plan = "mini", messages = [] } = req.body || {};
-    // Plan → modèle
-    const model = plan === "pro" ? "gpt-4o" : "gpt-4o-mini";
-const model = plan === "pro" ? "gpt-4o" : "gpt-4o-mini";
+    const { plan = "mini", messages = [] } = req.body;
 
-// 🔍 Vérifie si la question parle d'actualités
-const lastUserMessage = messages[messages.length - 1]?.content?.toLowerCase() || "";
+    const model =
+      plan === "pro"
+        ? "gpt-4o"
+        : plan === "mini"
+        ? "gpt-4o-mini"
+        : "gpt-3.5-turbo";
 
-if (
-  lastUserMessage.includes("actualité") ||
-  lastUserMessage.includes("résultat") ||
-  lastUserMessage.includes("aujourd'hui") ||
-  lastUserMessage.includes("ce soir")
-) {
-  const query = encodeURIComponent(lastUserMessage);
-  const newsResponse = await fetch(
-    `https://newsapi.org/v2/everything?q=${query}&language=fr&sortBy=publishedAt&pageSize=3&apiKey=${process.env.NEWSAPI_KEY}`
-  );
-  const newsData = await newsResponse.json();
+    const formatted = messages.map((m) => ({
+      role: m.role,
+      content: Array.isArray(m.content)
+        ? m.content
+        : [{ type: "text", text: m.content }],
+    }));
 
-  if (newsData.articles?.length > 0) {
-    const headlines = newsData.articles
-      .map(a => `🗞️ ${a.title} — ${a.source.name}`)
-      .join("\n\n");
-    return res.json({ reply: `Voici les dernières actualités :\n\n${headlines}` });
-  } else {
-    return res.json({ reply: "Je n’ai trouvé aucune actualité récente sur ce sujet." });
-  }
-}
-    // Transforme l’historique en messages OpenAI (support image)
-    // Chaque tour : si image présente, on envoie un "content" mixte (texte + image)
-    const formatted = [];
-    for (const m of messages){
-      const parts = [];
-      if (m.content) parts.push({ type:"text", text: m.content });
-      if (m.image)  parts.push(dataUrlToImageContent(m.image));
-      // si aucun contenu => ignore
-      if (parts.length===0) continue;
-
-      formatted.push({ role: m.role, content: parts });
-    }
-
-    // Appel
     const completion = await client.chat.completions.create({
       model,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        ...formatted
+        ...formatted,
       ],
-      temperature: 0.6,
-      max_tokens: 700
     });
 
-    const reply = completion.choices?.[0]?.message?.content || "";
-    res.json({ reply });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "AI_ERROR", detail: err?.message || String(err) });
+    res.json({
+      reply: completion.choices[0].message.content,
+    });
+  } catch (error) {
+    console.error("Erreur serveur:", error);
+    res.status(500).json({ error: "Erreur interne du serveur" });
   }
 });
 
-// Santé
-app.get("/healthz", (_, res) => res.status(200).json({ ok: true }));
-
+// 🌍 Démarrage du serveur
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Philomene backend prêt sur port", PORT));
+app.listen(PORT, () => {
+  console.log(`✅ Serveur lancé sur le port ${PORT}`);
+});
