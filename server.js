@@ -5,71 +5,67 @@ import OpenAI from "openai";
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "5mb" })); // pour images en base64
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ✨ Prompts “personnalités” par domaine
-const SYSTEM_PROMPTS = {
-  societe: `Tu es "Philomène Société" : une IA de vulgarisation sociale et environnementale. 
-Parle d'environnement, d'éducation, d'économie, de numérique et de citoyenneté.
-Réponds en français, avec empathie, concision et neutralité.`,
-  
-  oracle: `Tu es "Philomène Oracle" : une IA de réflexion et de conseils pratiques. 
-Aide à prendre des décisions avec clarté, bienveillance et logique.
-Pas d’ésotérisme, mais une sagesse concrète et pragmatique.`,
+// 🧠 Personnalité générale (sobre, utile, sans parti pris)
+const SYSTEM_PROMPT = `
+Tu es "Philomene GPT", un assistant français clair, concret et bienveillant.
+Règles :
+- Réponds en français, simplement, avec des étapes quand utile.
+- Donne des exemples concrets. Si l’utilisateur joint une image, décris ce que tu vois et relie l’analyse à sa question.
+- Pas d’affirmations non étayées. Si l’info est incertaine, dis-le.
+- Si on te demande un résumé actionnable, donne une to-do list courte.
+`;
 
-  culture: `Tu es "Philomène Culture" : une IA qui vulgarise la culture, les arts, l’histoire et la société. 
-Répond avec enthousiasme et curiosité. Donne des pistes de lecture, de films ou d’artistes.`,
+// 🧩 Utilitaires pour images envoyées en Data URL
+function dataUrlToImageContent(dataUrl){
+  if (!dataUrl) return null;
+  // OpenAI image input = { type:"image_url", image_url:{ url:"data:image/png;base64,..." } }
+  return { type: "image_url", image_url: { url: dataUrl } };
+}
 
-  sport: `Tu es "Philomène Analyste Sportif" : une IA d’analyse et de pédagogie du sport. 
-Explique les stratégies, la préparation mentale, les statistiques et la culture sportive.`
-};
-
-// 🌐 Middleware CORS manuel (plus fiable)
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-
-// 🚀 Route unique multi-domaines
-app.post("/ask/:bot", async (req, res) => {
+app.post("/api/chat", async (req, res) => {
   try {
-    const bot = req.params.bot?.toLowerCase();
-    const question = req.body.question?.trim();
+    const { plan = "mini", messages = [] } = req.body || {};
+    // Plan → modèle
+    const model = plan === "pro" ? "gpt-4o" : "gpt-4o-mini";
 
-    if (!bot || !SYSTEM_PROMPTS[bot]) {
-      return res.status(400).json({ error: "Bot inconnu ou manquant." });
-    }
-    if (!question) {
-      return res.status(400).json({ error: "Question vide." });
+    // Transforme l’historique en messages OpenAI (support image)
+    // Chaque tour : si image présente, on envoie un "content" mixte (texte + image)
+    const formatted = [];
+    for (const m of messages){
+      const parts = [];
+      if (m.content) parts.push({ type:"text", text: m.content });
+      if (m.image)  parts.push(dataUrlToImageContent(m.image));
+      // si aucun contenu => ignore
+      if (parts.length===0) continue;
+
+      formatted.push({ role: m.role, content: parts });
     }
 
-    const system = SYSTEM_PROMPTS[bot];
+    // Appel
     const completion = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+      model,
       messages: [
-        { role: "system", content: system },
-        { role: "user", content: question }
+        { role: "system", content: SYSTEM_PROMPT },
+        ...formatted
       ],
-      temperature: 0.7,
-      max_tokens: 500
+      temperature: 0.6,
+      max_tokens: 700
     });
 
-    const answer = completion.choices?.[0]?.message?.content || "Je n’ai pas pu répondre.";
-    res.json({ answer });
+    const reply = completion.choices?.[0]?.message?.content || "";
+    res.json({ reply });
   } catch (err) {
-    console.error("AI Error:", err.message);
-    res.status(500).json({ error: "AI_ERROR", detail: err.message });
+    console.error(err);
+    res.status(500).json({ error: "AI_ERROR", detail: err?.message || String(err) });
   }
 });
 
-// ✅ Healthcheck
-app.get("/healthz", (_, res) => res.status(200).send("ok"));
+// Santé
+app.get("/healthz", (_, res) => res.status(200).json({ ok: true }));
 
-// 🚀 Démarrage
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Backend Philomène prêt sur le port ${PORT}`));
+app.listen(PORT, () => console.log("Philomene backend prêt sur port", PORT));
