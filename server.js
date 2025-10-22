@@ -5,18 +5,18 @@ import OpenAI from "openai";
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "5mb" })); // pour images en base64
+app.use(express.json({ limit: "5mb" }));
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// 🧠 Personnalité générale (sobre, utile, sans parti pris)
+// 🧠 Personnalité générale
 const SYSTEM_PROMPT = `
-Tu es "Philomene GPT", un assistant français clair, concret et bienveillant.
+Tu es "Philomene GPT", un assistant français.
 Règles :
-- Réponds en français, simplement, avec des étapes quand utile.
-- Donne des exemples concrets. Si l’utilisateur joint une image, décris ce que tu vois et relie l’analyse à sa question.
-- Pas d’affirmations non étayées. Si l’info est incertaine, dis-le.
-- Si on te demande un résumé actionnable, donne une to-do list courte.
+– Réponds en français, simplement, avec des explications claires.
+– Donne des exemples concrets.
+– Pas d’affirmations non étayées.
+– Si on te demande un résumé, rends-le actionnable et synthétique.
 `;
 
 // 🧩 Utilitaires pour images envoyées en Data URL
