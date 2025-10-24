@@ -1,156 +1,333 @@
-import express from "express";
-import cors from "cors";
-import fetch from "node-fetch";
-import dotenv from "dotenv";
-import OpenAI from "openai";
-dotenv.config();
+// server.js — CommonJS, prêt pour Render
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-app.use(express.json({ limit: "10mb" }));
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const fetch = require("node-fetch");
+const OpenAI = require("openai");
 
-// CORS
-const ORIGINS = (process.env.ALLOWED_ORIGINS||"").split(",").map(s=>s.trim()).filter(Boolean);
-app.use(cors({
-  origin: (origin, cb)=> { if(!origin) return cb(null,true); if(ORIGINS.includes(origin)) return cb(null,true); return cb(null,true); /* autorise tout si besoin */ },
-}));
+// ====== CONFIG ======
+const PORT = process.env.PORT || 10000;
+
+// Domaines autorisés (ajoute/supprime si besoin)
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "https://philomenia.com",
+  "https://www.philomenia.com",
+  "https://philomeneia.com",
+  "https://www.philomeneia.com"
+];
 
 // OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// === Quotas & tokens (mémoire simple) ===
-const initialFree = 2000;            // tokens gratuits
-const maxTokensPerMsg = 1000;        // garde-fou par message
-const usage = {}; // { clientId: { month:'YYYYMM', free: remaining, paid: remaining } }
+// SERPER (actualités)
+const SERPER_KEY = process.env.SERPER_API_KEY;
 
-function ymNow(){ const d=new Date(); return `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}`; }
-function ensureClient(clientId){
-  const m=ymNow(); usage[clientId] ||= { month:m, free:initialFree, paid:0 };
-  if(usage[clientId].month!==m){ usage[clientId]={ month:m, free:initialFree, paid:usage[clientId].paid }; }
-  return usage[clientId];
-}
-function approxTokens(str){ return Math.ceil((str||"").length/4); }
+// PayPal
+const PAYPAL_MODE = (process.env.PAYPAL_MODE || "sandbox").toLowerCase(); // "sandbox" | "live"
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || "";
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || "";
+const PP_BASE =
+  PAYPAL_MODE === "live"
+    ? "https://api-m.paypal.com"
+    : "https://api-m.sandbox.paypal.com";
 
-// Packs (prix EUR → tokens crédités)
-const PACKS = {
-  PACK_5:  { amount:"5.00",  tokens:4000 },
-  PACK_10: { amount:"10.00", tokens:9000 },
-  PACK_20: { amount:"20.00", tokens:20000 },
+// ====== APP ======
+const app = express();
+app.use(express.json({ limit: "10mb" }));
+
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(null, true); // ou cb(new Error("Origin not allowed"));
+    },
+    credentials: true
+  })
+);
+
+// ====== QUOTAS / TOKENS ======
+// Free: 5 000 tokens, Payant: illimité selon achats.
+// Compteur très simple en mémoire par client-id.
+const STORE = {
+  // clientId: { freeRemaining: number, paidBalance: number }
 };
 
-// === Routes simples ===
-app.get("/health", (_req,res)=>res.json({ ok:true }));
-app.get("/api/quota", (req,res)=>{
-  const u = ensureClient(req.headers["x-client-id"]||"anon");
-  res.json({ tier: u.paid>0 ? "paid" : "free", remaining: (u.free+u.paid) });
+function ensureClient(clientId) {
+  if (!STORE[clientId]) {
+    STORE[clientId] = { freeRemaining: 5000, paidBalance: 0 };
+  }
+  return STORE[clientId];
+}
+
+// estimation approx. des tokens (≈ 4 chars = 1 token)
+function approxTokens(str) {
+  if (!str) return 0;
+  return Math.max(1, Math.ceil(String(str).length / 4));
+}
+
+// ====== HEALTH ======
+app.get("/", (_req, res) => res.json({ ok: true }));
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// ====== QUOTA ======
+app.get("/api/quota", (req, res) => {
+  const clientId = req.headers["x-client-id"] || "anon";
+  const c = ensureClient(clientId);
+  res.json({
+    clientId,
+    freeRemaining: c.freeRemaining,
+    paidBalance: c.paidBalance,
+    totalRemaining: c.freeRemaining + c.paidBalance
+  });
 });
 
-// Actualités via Serper
-app.get("/api/news", async (req,res)=>{
-  try{
-    const q = (req.query.q||"").toString().trim();
-    if(!q) return res.status(400).json({ error:"Paramètre q requis" });
-    const r = await fetch("https://google.serper.dev/news",{
-      method:"POST",
-      headers:{ "X-API-KEY":process.env.SERPER_API_KEY, "Content-Type":"application/json" },
+// ====== NEWS (SERPER) ======
+app.get("/api/news", async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString().trim();
+    if (!q) return res.status(400).json({ error: "Paramètre q requis" });
+    if (!SERPER_KEY) return res.status(500).json({ error: "SERPER_API_KEY manquante" });
+
+    const r = await fetch("https://google.serper.dev/news", {
+      method: "POST",
+      headers: {
+        "X-API-KEY": SERPER_KEY,
+        "Content-Type": "application/json"
+      },
       body: JSON.stringify({ q })
     });
+
     const j = await r.json();
-    const items = (j.news||[]).slice(0,3).map(it=>({ title:it.title, link:it.link, date:it.date }));
+    const items = (j.news || []).slice(0, 5).map((n) => ({
+      title: n.title,
+      url: n.link,
+      source: n.source,
+      date: n.date
+    }));
     res.json({ results: items });
-  }catch(e){ console.error(e); res.status(500).json({ error:"Erreur actu" }); }
+  } catch (err) {
+    console.error("News error:", err);
+    res.status(500).json({ error: "Erreur actualités" });
+  }
 });
 
-// Chat
-app.post("/api/chat", async (req,res)=>{
-  try{
-    const clientId = req.headers["x-client-id"]||"anon";
-    const lang = (req.headers["x-lang"]||"fr").toString();
-    const { message, image } = req.body||{};
-    if(!message || typeof message!=="string") return res.status(400).json({ error:"message requis" });
+// ====== CHAT ======
+app.post("/api/chat", async (req, res) => {
+  try {
+    const clientId = req.headers["x-client-id"] || "anon";
+    const lang = (req.headers["x-lang"] || "fr").toString().toLowerCase();
+    const model =
+      (req.headers["x-model"] || "").trim() ||
+      "gpt-4o-mini"; // modèle par défaut (économique)
 
-    const u = ensureClient(clientId);
-    const estimate = Math.min(maxTokensPerMsg, approxTokens(message));
-    if((u.free+u.paid) <= 0) return res.status(402).json({ error:"Quota atteint" });
+    const { message, image } = req.body || {};
+    const text = (message || "").toString().trim();
 
-    // Sélection modèle (on reste sur gpt-4o-mini pour coût, basculable si u.paid>0)
-    const model = "gpt-4o-mini"; // tu peux mettre un modèle plus costaud si u.paid>0
+    if (!text && !image) {
+      return res.status(400).json({ error: "message ou image requis" });
+    }
 
-    const userParts = [{ type:"text", text: message }];
-    if(image && /^data:image\/(png|jpe?g);base64,/.test(image)){
-      userParts.push({ type:"input_image", image_url: { url: image } });
+    // Vérifie/consomme tokens
+    const c = ensureClient(clientId);
+    const estimated = approxTokens(text) + (image ? 200 : 0); // image ~ gros coût arbitraire
+    let remaining = c.freeRemaining + c.paidBalance;
+    if (remaining <= 0) {
+      return res.status(402).json({
+        error: "Plus de tokens. Recharge via PayPal.",
+        quota: {
+          freeRemaining: c.freeRemaining,
+          paidBalance: c.paidBalance,
+          totalRemaining: remaining
+        }
+      });
+    }
+    // Consomme d'abord le gratuit
+    let toConsume = estimated;
+    let consumeFree = Math.min(c.freeRemaining, toConsume);
+    c.freeRemaining -= consumeFree;
+    toConsume -= consumeFree;
+    if (toConsume > 0) {
+      c.paidBalance = Math.max(0, c.paidBalance - toConsume);
+    }
+
+    const systemPrompt =
+      lang === "fr"
+        ? "Tu es Philomène, utile, claire et concise. Réponds en français naturel."
+        : lang === "nl"
+        ? "Je bent Philomène, behulpzaam en duidelijk. Antwoord in natuurlijk Nederlands."
+        : "You are Philomène, helpful and clear. Answer in natural English.";
+
+    const msgs = [{ role: "system", content: systemPrompt }];
+
+    if (image && image.startsWith("data:image/")) {
+      msgs.push({
+        role: "user",
+        content: [
+          { type: "text", text },
+          { type: "image_url", image_url: { url: image } }
+        ]
+      });
+    } else {
+      msgs.push({ role: "user", content: text });
     }
 
     const completion = await openai.chat.completions.create({
       model,
-      max_tokens: 800,
-      messages: [
-        { role:"system", content:`Tu es Philomène, utile, précise, style clair. Réponds en ${lang}.` },
-        { role:"user", content: userParts }
-      ]
+      temperature: 0.5,
+      max_tokens: 600, // sécurité
+      messages: msgs
     });
 
-    const reply = completion.choices?.[0]?.message?.content || "(pas de réponse)";
+    const reply =
+      completion.choices?.[0]?.message?.content?.trim() || "(pas de réponse)";
 
-    // débit tokens (d'abord le free puis le paid)
-    let cost = approxTokens(message + reply);
-    cost = Math.min(cost, (u.free+u.paid));
-    const fromFree = Math.min(cost, u.free); u.free -= fromFree; u.paid -= (cost-fromFree);
+    // Mise à jour du compteur selon la réponse (sortie)
+    const outTokens = approxTokens(reply);
+    let moreToConsume = outTokens;
+    if (c.freeRemaining > 0) {
+      const f = Math.min(c.freeRemaining, moreToConsume);
+      c.freeRemaining -= f;
+      moreToConsume -= f;
+    }
+    if (moreToConsume > 0) {
+      c.paidBalance = Math.max(0, c.paidBalance - moreToConsume);
+    }
 
-    res.json({ reply, quota:{ remaining: u.free+u.paid } });
-  }catch(e){ console.error("chat error", e); res.status(500).json({ error:"Erreur serveur" }); }
+    res.json({
+      reply,
+      quota: {
+        freeRemaining: c.freeRemaining,
+        paidBalance: c.paidBalance,
+        totalRemaining: c.freeRemaining + c.paidBalance
+      }
+    });
+  } catch (err) {
+    console.error("Chat error:", err);
+    res.status(500).json({ error: "Erreur serveur (chat)" });
+  }
 });
 
-// === PayPal (create + capture) ===
-const PP_BASE = process.env.PAYPAL_MODE==="live" ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com";
-async function paypalToken(){
-  const r = await fetch(PP_BASE+"/v1/oauth2/token",{
-    method:"POST",
-    headers:{ "Authorization":"Basic "+Buffer.from(process.env.PAYPAL_CLIENT_ID+":"+process.env.PAYPAL_SECRET).toString("base64"), "Content-Type":"application/x-www-form-urlencoded" },
-    body:"grant_type=client_credentials"
+// ====== PAYPAL ======
+async function paypalAccessToken() {
+  const r = await fetch(`${PP_BASE}/v1/oauth2/token`, {
+    method: "POST",
+    headers: {
+      Authorization:
+        "Basic " +
+        Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString(
+          "base64"
+        ),
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: "grant_type=client_credentials"
   });
-  const j = await r.json(); return j.access_token;
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error("PayPal token failed: " + t);
+  }
+  const j = await r.json();
+  return j.access_token;
 }
-// crée une commande pour un pack
-app.post("/api/paypal/create-order", async (req,res)=>{
-  try{
-    const { packId } = req.body||{};
-    const pack = PACKS[packId]; if(!pack) return res.status(400).json({ error:"pack invalide" });
-    const tok = await paypalToken();
-    const r = await fetch(PP_BASE+"/v2/checkout/orders",{
-      method:"POST",
-      headers:{ "Authorization":"Bearer "+tok, "Content-Type":"application/json" },
+
+// Créer une commande
+app.post("/api/paypal/create-order", async (req, res) => {
+  try {
+    const clientId = req.headers["x-client-id"] || "anon";
+    ensureClient(clientId);
+
+    const { price, tokens } = req.body || {};
+    if (!price || !tokens) {
+      return res.status(400).json({ error: "price et tokens requis" });
+    }
+
+    const access = await paypalAccessToken();
+    const r = await fetch(`${PP_BASE}/v2/checkout/orders`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access}`,
+        "Content-Type": "application/json"
+      },
       body: JSON.stringify({
-        intent:"CAPTURE",
-        purchase_units:[{ amount:{ currency_code:"EUR", value: pack.amount }, custom_id: packId }]
+        intent: "CAPTURE",
+        purchase_units: [
+          {
+            amount: {
+              currency_code: "EUR",
+              value: String(price)
+            },
+            custom_id: JSON.stringify({ clientId, tokens })
+          }
+        ],
+        application_context: {
+          brand_name: "Philomenia",
+          landing_page: "NO_PREFERENCE",
+          user_action: "PAY_NOW",
+          return_url: "https://philomeneia.com", // tu peux utiliser une page "Merci"
+          cancel_url: "https://philomeneia.com"
+        }
       })
     });
-    const j = await r.json(); res.json({ id:j.id });
-  }catch(e){ console.error(e); res.status(500).json({ error:"paypal create" }); }
+    const j = await r.json();
+    const approve = (j.links || []).find((l) => l.rel === "approve")?.href;
+    res.json({ orderId: j.id, approveUrl: approve });
+  } catch (err) {
+    console.error("PP create-order error:", err);
+    res.status(500).json({ error: "Erreur PayPal (create-order)" });
+  }
 });
 
-// capture + crédit tokens
-app.post("/api/paypal/capture-order", async (req,res)=>{
-  try{
-    const clientId = req.headers["x-client-id"]||"anon";
-    const { orderId } = req.body||{};
-    const tok = await paypalToken();
-    const r = await fetch(PP_BASE+`/v2/checkout/orders/${orderId}/capture`,{
-      method:"POST", headers:{ "Authorization":"Bearer "+tok, "Content-Type":"application/json" }
+// Capturer une commande et créditer les tokens
+app.post("/api/paypal/capture", async (req, res) => {
+  try {
+    const { orderId } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: "orderId requis" });
+
+    const access = await paypalAccessToken();
+    const r = await fetch(`${PP_BASE}/v2/checkout/orders/${orderId}/capture`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access}`,
+        "Content-Type": "application/json"
+      }
     });
     const j = await r.json();
-    const unit = j?.purchase_units?.[0];
-    const cap = unit?.payments?.captures?.[0];
-    const amount = cap?.amount?.value;
-    const packId = unit?.custom_id;
-    const pack = Object.values(PACKS).find(p=>p.amount===amount) || PACKS[packId];
-    if(cap?.status!=="COMPLETED" || !pack) return res.json({ ok:false });
 
-    // crédit
-    const u = ensureClient(clientId);
-    u.paid += pack.tokens;
-    res.json({ ok:true, added: pack.tokens, remaining: u.free+u.paid });
-  }catch(e){ console.error(e); res.status(500).json({ ok:false, error:"paypal capture" }); }
+    const unit = j.purchase_units?.[0];
+    let credited = 0;
+    if (unit?.payments?.captures?.[0]?.status === "COMPLETED") {
+      // On récupère ce qu'on a encodé dans custom_id (clientId + tokens)
+      let meta = {};
+      try {
+        meta = JSON.parse(unit.custom_id || "{}");
+      } catch (_) {}
+      const clientId = meta.clientId || "anon";
+      const tokens = parseInt(meta.tokens || 0, 10) || 0;
+      const c = ensureClient(clientId);
+      c.paidBalance += tokens;
+      credited = tokens;
+      return res.json({
+        ok: true,
+        credited,
+        quota: {
+          freeRemaining: c.freeRemaining,
+          paidBalance: c.paidBalance,
+          totalRemaining: c.freeRemaining + c.paidBalance
+        }
+      });
+    } else {
+      return res.status(400).json({ error: "Capture non complétée", data: j });
+    }
+  } catch (err) {
+    console.error("PP capture error:", err);
+    res.status(500).json({ error: "Erreur PayPal (capture)" });
+  }
 });
 
-app.listen(PORT, ()=> console.log("✅ Backend en ligne sur le port", PORT));
+// ====== START ======
+app.listen(PORT, () => {
+  console.log("✅ Server running on port", PORT);
+});
