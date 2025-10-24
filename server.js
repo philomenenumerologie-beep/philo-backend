@@ -1,229 +1,156 @@
-// --- Philomenia Backend (quotas sans coupon) ---
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
-import OpenAI from "openai";
 import dotenv from "dotenv";
+import OpenAI from "openai";
 dotenv.config();
 
-// ---- OpenAI
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.use(express.json({ limit: "10mb" }));
+
+// CORS
+const ORIGINS = (process.env.ALLOWED_ORIGINS||"").split(",").map(s=>s.trim()).filter(Boolean);
+app.use(cors({
+  origin: (origin, cb)=> { if(!origin) return cb(null,true); if(ORIGINS.includes(origin)) return cb(null,true); return cb(null,true); /* autorise tout si besoin */ },
+}));
+
+// OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---- CORS
-const DEFAULT_ORIGINS = [
-  "http://localhost:5173",
-  "http://localhost:3000",
-  "https://philomenia.com",
-  "https://www.philomenia.com",
-  "https://philomeneia.com",
-  "https://www.philomeneia.com"
-];
-const ALLOWED = (process.env.ALLOWED_ORIGINS || DEFAULT_ORIGINS.join(","))
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+// === Quotas & tokens (mémoire simple) ===
+const initialFree = 2000;            // tokens gratuits
+const maxTokensPerMsg = 1000;        // garde-fou par message
+const usage = {}; // { clientId: { month:'YYYYMM', free: remaining, paid: remaining } }
 
-const app = express();
-app.use(express.json({ limit: "10mb" }));
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // mobile apps / curl
-      return cb(null, ALLOWED.includes(origin));
-    }
-  })
-);
+function ymNow(){ const d=new Date(); return `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}`; }
+function ensureClient(clientId){
+  const m=ymNow(); usage[clientId] ||= { month:m, free:initialFree, paid:0 };
+  if(usage[clientId].month!==m){ usage[clientId]={ month:m, free:initialFree, paid:usage[clientId].paid }; }
+  return usage[clientId];
+}
+function approxTokens(str){ return Math.ceil((str||"").length/4); }
 
-// ---- Tiers & quotas
-// maxTokens: limite par requête vers OpenAI (sécurité)
-const TIER = {
-  free: { monthly: 500, maxTokens: 2000 },
-  mini: { monthly: 10_000, maxTokens: 4000 },
-  pro:  { monthly: 60_000, maxTokens: 8000 }
+// Packs (prix EUR → tokens crédités)
+const PACKS = {
+  PACK_5:  { amount:"5.00",  tokens:4000 },
+  PACK_10: { amount:"10.00", tokens:9000 },
+  PACK_20: { amount:"20.00", tokens:20000 },
 };
 
-// ---- Stockage usage (mémoire). Pour la prod durable : Redis/DB.
-const usage = {}; // { [clientId]: { [yyyymm]: { used: number } } }
-
-const ymNow = () => {
-  const d = new Date();
-  return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-};
-
-// ---- Helpers
-const approxTokens = (str = "") => Math.ceil((str || "").length / 4);
-
-// Détermine le palier à partir des headers
-function resolveTier(req) {
-  // Front enverra `x-tier: free|mini|pro` (par défaut free)
-  let tier = (req.headers["x-tier"] || "free").toString().toLowerCase();
-  if (!["free", "mini", "pro"].includes(tier)) tier = "free";
-  return tier;
-}
-
-// Récupère l'identifiant client (à garder simple : header requis côté front)
-function resolveClientId(req) {
-  // front envoie un x-client-id (localStorage UID). Si absent, fallback à IP.
-  return (
-    (req.headers["x-client-id"] || "").toString() ||
-    req.ip ||
-    "anonymous"
-  );
-}
-
-// Ajoute la conso et renvoie {used, remaining}
-function checkAndAddUsage(clientId, tier, tokensToAdd) {
-  const month = ymNow();
-  usage[clientId] ||= {};
-  usage[clientId][month] ||= { used: 0 };
-
-  const limit = TIER[tier].monthly;
-  const u = usage[clientId][month];
-  const remaining = Math.max(0, limit - u.used);
-
-  if (tokensToAdd > remaining) {
-    return { ok: false, limit, used: u.used, remaining };
-  }
-  u.used += tokensToAdd;
-  return { ok: true, limit, used: u.used, remaining: limit - u.used };
-}
-
-// ---- Routes
-
-// Santé
-app.get("/health", (_, res) => res.json({ ok: true }));
-
-// Quota
-app.get("/api/quota", (req, res) => {
-  const clientId = resolveClientId(req);
-  const tier = resolveTier(req);
-  const month = ymNow();
-  const u = usage[clientId]?.[month]?.used || 0;
-  const limit = TIER[tier].monthly;
-  res.json({
-    tier,
-    monthlyLimit: limit,
-    used: u,
-    remaining: Math.max(0, limit - u)
-  });
+// === Routes simples ===
+app.get("/health", (_req,res)=>res.json({ ok:true }));
+app.get("/api/quota", (req,res)=>{
+  const u = ensureClient(req.headers["x-client-id"]||"anon");
+  res.json({ tier: u.paid>0 ? "paid" : "free", remaining: (u.free+u.paid) });
 });
 
 // Actualités via Serper
-app.get("/api/news", async (req, res) => {
-  try {
-    const q = (req.query.q || "").toString().trim();
-    if (!q) return res.status(400).json({ error: "Paramètre 'q' requis" });
-
-    const r = await fetch("https://google.serper.dev/news", {
-      method: "POST",
-      headers: {
-        "X-API-KEY": process.env.SERPER_API_KEY || "",
-        "Content-Type": "application/json"
-      },
+app.get("/api/news", async (req,res)=>{
+  try{
+    const q = (req.query.q||"").toString().trim();
+    if(!q) return res.status(400).json({ error:"Paramètre q requis" });
+    const r = await fetch("https://google.serper.dev/news",{
+      method:"POST",
+      headers:{ "X-API-KEY":process.env.SERPER_API_KEY, "Content-Type":"application/json" },
       body: JSON.stringify({ q })
     });
-    const data = await r.json();
-
-    const items = (data.news || []).slice(0, 5).map(item => ({
-      title: item.title,
-      link: item.link,
-      source: item.source,
-      date: item.date
-    }));
-
+    const j = await r.json();
+    const items = (j.news||[]).slice(0,3).map(it=>({ title:it.title, link:it.link, date:it.date }));
     res.json({ results: items });
-  } catch (e) {
-    console.error("News error:", e);
-    res.status(500).json({ error: "Erreur actus." });
-  }
+  }catch(e){ console.error(e); res.status(500).json({ error:"Erreur actu" }); }
 });
 
 // Chat
-app.post("/api/chat", async (req, res) => {
-  try {
-    const clientId = resolveClientId(req);
-    const tier = resolveTier(req);
+app.post("/api/chat", async (req,res)=>{
+  try{
+    const clientId = req.headers["x-client-id"]||"anon";
+    const lang = (req.headers["x-lang"]||"fr").toString();
+    const { message, image } = req.body||{};
+    if(!message || typeof message!=="string") return res.status(400).json({ error:"message requis" });
 
-    const messageRaw = (req.body?.message || "").toString();
-    const imageBase64 = (req.body?.imageBase64 || "").toString(); // optionnel
-    if (!messageRaw && !imageBase64) {
-      return res.status(400).json({ error: "Message ou image requis." });
-    }
+    const u = ensureClient(clientId);
+    const estimate = Math.min(maxTokensPerMsg, approxTokens(message));
+    if((u.free+u.paid) <= 0) return res.status(402).json({ error:"Quota atteint" });
 
-    const promptTokens = approxTokens(messageRaw);
-    const maxGen = TIER[tier].maxTokens;
+    // Sélection modèle (on reste sur gpt-4o-mini pour coût, basculable si u.paid>0)
+    const model = "gpt-4o-mini"; // tu peux mettre un modèle plus costaud si u.paid>0
 
-    // On calcule la conso *avant* (prompt + sortie max théorique prudente ~50% de maxGen)
-    const expected = promptTokens + Math.ceil(maxGen * 0.5);
-    const quota = checkAndAddUsage(clientId, tier, expected);
-    if (!quota.ok) {
-      return res.status(402).json({
-        error: "Quota mensuel atteint. Passe à l’abonnement supérieur.",
-        quota: { used: quota.used, remaining: quota.remaining }
-      });
-    }
-
-    // Messages pour OpenAI
-    const messages = [
-      {
-        role: "system",
-        content:
-          "Tu es Philomène, utile, concise, avec un ton chaleureux style assistant MSN. Réponds en français si l’utilisateur parle français."
-      },
-    ];
-
-    if (imageBase64) {
-      messages.push({
-        role: "user",
-        content: [
-          { type: "text", text: messageRaw || "Analyse cette image, stp." },
-          {
-            type: "input_image",
-            image_url: { url: `data:image/png;base64,${imageBase64}` }
-          }
-        ]
-      });
-    } else {
-      messages.push({ role: "user", content: messageRaw });
+    const userParts = [{ type:"text", text: message }];
+    if(image && /^data:image\/(png|jpe?g);base64,/.test(image)){
+      userParts.push({ type:"input_image", image_url: { url: image } });
     }
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      max_tokens: maxGen,
-      temperature: 0.4,
-      messages
+      model,
+      max_tokens: 800,
+      messages: [
+        { role:"system", content:`Tu es Philomène, utile, précise, style clair. Réponds en ${lang}.` },
+        { role:"user", content: userParts }
+      ]
     });
 
-    const replyText =
-      completion.choices?.[0]?.message?.content?.trim() || "(pas de réponse)";
-    // Ajuste la conso réelle (diff entre prévu et réel)
-    const realOut = approxTokens(replyText);
-    const realTotal = promptTokens + realOut;
-    const month = ymNow();
-    usage[clientId][month].used -= expected; // retire l'estimation
-    const again = checkAndAddUsage(clientId, tier, realTotal); // pose la conso réelle
-    if (!again.ok) {
-      // si ça passe pas en réel (rare), on remet l'estimation initiale au lieu du réel pour ne pas bloquer
-      usage[clientId][month].used += expected;
-    }
+    const reply = completion.choices?.[0]?.message?.content || "(pas de réponse)";
 
-    const u = usage[clientId][month].used;
-    res.json({
-      reply: replyText,
-      quota: {
-        tier,
-        used: u,
-        remaining: Math.max(0, TIER[tier].monthly - u)
-      }
+    // débit tokens (d'abord le free puis le paid)
+    let cost = approxTokens(message + reply);
+    cost = Math.min(cost, (u.free+u.paid));
+    const fromFree = Math.min(cost, u.free); u.free -= fromFree; u.paid -= (cost-fromFree);
+
+    res.json({ reply, quota:{ remaining: u.free+u.paid } });
+  }catch(e){ console.error("chat error", e); res.status(500).json({ error:"Erreur serveur" }); }
+});
+
+// === PayPal (create + capture) ===
+const PP_BASE = process.env.PAYPAL_MODE==="live" ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com";
+async function paypalToken(){
+  const r = await fetch(PP_BASE+"/v1/oauth2/token",{
+    method:"POST",
+    headers:{ "Authorization":"Basic "+Buffer.from(process.env.PAYPAL_CLIENT_ID+":"+process.env.PAYPAL_SECRET).toString("base64"), "Content-Type":"application/x-www-form-urlencoded" },
+    body:"grant_type=client_credentials"
+  });
+  const j = await r.json(); return j.access_token;
+}
+// crée une commande pour un pack
+app.post("/api/paypal/create-order", async (req,res)=>{
+  try{
+    const { packId } = req.body||{};
+    const pack = PACKS[packId]; if(!pack) return res.status(400).json({ error:"pack invalide" });
+    const tok = await paypalToken();
+    const r = await fetch(PP_BASE+"/v2/checkout/orders",{
+      method:"POST",
+      headers:{ "Authorization":"Bearer "+tok, "Content-Type":"application/json" },
+      body: JSON.stringify({
+        intent:"CAPTURE",
+        purchase_units:[{ amount:{ currency_code:"EUR", value: pack.amount }, custom_id: packId }]
+      })
     });
-  } catch (error) {
-    console.error("Erreur backend:", error);
-    res.status(500).json({ error: "Erreur serveur." });
-  }
+    const j = await r.json(); res.json({ id:j.id });
+  }catch(e){ console.error(e); res.status(500).json({ error:"paypal create" }); }
 });
 
-// ---- Lancement
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`✅ Serveur en ligne sur le port ${PORT}`);
+// capture + crédit tokens
+app.post("/api/paypal/capture-order", async (req,res)=>{
+  try{
+    const clientId = req.headers["x-client-id"]||"anon";
+    const { orderId } = req.body||{};
+    const tok = await paypalToken();
+    const r = await fetch(PP_BASE+`/v2/checkout/orders/${orderId}/capture`,{
+      method:"POST", headers:{ "Authorization":"Bearer "+tok, "Content-Type":"application/json" }
+    });
+    const j = await r.json();
+    const unit = j?.purchase_units?.[0];
+    const cap = unit?.payments?.captures?.[0];
+    const amount = cap?.amount?.value;
+    const packId = unit?.custom_id;
+    const pack = Object.values(PACKS).find(p=>p.amount===amount) || PACKS[packId];
+    if(cap?.status!=="COMPLETED" || !pack) return res.json({ ok:false });
+
+    // crédit
+    const u = ensureClient(clientId);
+    u.paid += pack.tokens;
+    res.json({ ok:true, added: pack.tokens, remaining: u.free+u.paid });
+  }catch(e){ console.error(e); res.status(500).json({ ok:false, error:"paypal capture" }); }
 });
+
+app.listen(PORT, ()=> console.log("✅ Backend en ligne sur le port", PORT));
