@@ -4,10 +4,21 @@ import OpenAI from "openai";
 import dotenv from "dotenv";
 
 dotenv.config();
-
+import cors from "cors";
 const app = express();
 app.use(express.json({ limit: "10mb" }));
-
+app.use(
+  cors({
+    origin: [
+      "https://philomeneia.com",
+      "https://www.philomeneia.com",
+      "https://philomania.com",
+      "https://www.philomania.com"
+    ],
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"],
+  })
+);
 // --- Clés API (à configurer dans Render → Environment Variables)
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
