@@ -211,72 +211,89 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// ====== PAYPAL ======
+// === PayPal (token + create order) ===
+const PP_BASE = process.env.PAYPAL_MODE === "live"
+  ? "https://api-m.paypal.com"
+  : "https://api-m.sandbox.paypal.com";
+
 async function paypalAccessToken() {
+  const creds = Buffer
+    .from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`)
+    .toString("base64");
+
   const r = await fetch(`${PP_BASE}/v1/oauth2/token`, {
     method: "POST",
     headers: {
-      Authorization:
-        "Basic " +
-        Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString(
-          "base64"
-        ),
+      "Authorization": `Basic ${creds}`,
       "Content-Type": "application/x-www-form-urlencoded"
     },
     body: "grant_type=client_credentials"
   });
-  if (!r.ok) {
-    const t = await r.text();
-    throw new Error("PayPal token failed: " + t);
-  }
+
   const j = await r.json();
+  if (!r.ok) {
+    console.error("paypal token error", j);
+    throw new Error(j.error_description || j.error || "paypal token error");
+  }
   return j.access_token;
 }
 
-// Créer une commande
+// Route de debug pour vérifier le token PayPal
+app.get("/api/paypal/debug", async (_req, res) => {
+  try {
+    const t = await paypalAccessToken();
+    res.json({
+      ok: true,
+      mode: process.env.PAYPAL_MODE,
+      tokenPreview: t.slice(0, 12) + "…"
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+// Création d'une commande (redirigé vers PayPal ensuite)
 app.post("/api/paypal/create-order", async (req, res) => {
   try {
-    const clientId = req.headers["x-client-id"] || "anon";
-    ensureClient(clientId);
+    if (process.env.PAYMENT_ENABLED !== "true") {
+      return res.status(503).json({ error: "Payments are disabled" });
+    }
 
-    const { price, tokens } = req.body || {};
+    const { price, tokens } = req.body;
     if (!price || !tokens) {
-      return res.status(400).json({ error: "price et tokens requis" });
+      return res.status(400).json({ error: "Missing price or tokens" });
     }
 
     const access = await paypalAccessToken();
     const r = await fetch(`${PP_BASE}/v2/checkout/orders`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${access}`,
+        "Authorization": `Bearer ${access}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
         intent: "CAPTURE",
-        purchase_units: [
-          {
-            amount: {
-              currency_code: "EUR",
-              value: String(price)
-            },
-            custom_id: JSON.stringify({ clientId, tokens })
-          }
-        ],
+        purchase_units: [{
+          amount: { currency_code: "EUR", value: Number(price).toFixed(2) },
+          custom_id: String(tokens)
+        }],
         application_context: {
-          brand_name: "Philomenia",
-          landing_page: "NO_PREFERENCE",
-          user_action: "PAY_NOW",
-          return_url: "https://philomeneia.com", // tu peux utiliser une page "Merci"
-          cancel_url: "https://philomeneia.com"
+          user_action: "PAY_NOW" // (facultatif) bouton Pay Now
         }
       })
     });
+
     const j = await r.json();
-    const approve = (j.links || []).find((l) => l.rel === "approve")?.href;
-    res.json({ orderId: j.id, approveUrl: approve });
-  } catch (err) {
-    console.error("PP create-order error:", err);
-    res.status(500).json({ error: "Erreur PayPal (create-order)" });
+    if (!r.ok) {
+      console.error("create order error", j);
+      return res.status(500).json({ error: "PP create order", details: j });
+    }
+
+    const approveUrl = j.links?.find(l => l.rel === "approve")?.href;
+    return res.json({ id: j.id, approveUrl });
+  } catch (e) {
+    console.error("create order catch", e);
+    res.status(500).json({ error: String(e) });
   }
 });
 
