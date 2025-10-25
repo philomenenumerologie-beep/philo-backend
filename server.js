@@ -50,7 +50,7 @@ app.use(
 );
 
 // ====== QUOTAS / TOKENS ======
-// Free: 5 000 tokens, Payant: illimité selon achats.
+// Free: 1 000 tokens, Payant: illimité selon achats.
 // Compteur très simple en mémoire par client-id.
 const STORE = {
   // clientId: { freeRemaining: number, paidBalance: number }
@@ -58,7 +58,7 @@ const STORE = {
 
 function ensureClient(clientId) {
   if (!STORE[clientId]) {
-    STORE[clientId] = { freeRemaining: 5000, paidBalance: 0 };
+    STORE[clientId] = { freeRemaining:  1000, paidBalance: 0 };
   }
   return STORE[clientId];
 }
