@@ -58,7 +58,7 @@ const STORE = {
 
 function ensureClient(clientId) {
   if (!STORE[clientId]) {
-    STORE[clientId] = { freeRemaining:  1000, paidBalance: 0 };
+ STORE[clientId] = { freeRemaining: 1000, paidBalance: 0 };   
   }
   return STORE[clientId];
 }
