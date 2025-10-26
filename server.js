@@ -34,6 +34,10 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions)); // préflight
+// --- Health check & debug ---
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, time: Date.now(), origin: req.headers.origin || null });
+});
 // ===== fin CORS =====
 
 // ====== DB ======
