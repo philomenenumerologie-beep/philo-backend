@@ -4,9 +4,10 @@
 require('dotenv').config();
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');           // ← change ici
 const cookieParser = require('cookie-parser');
-const { v4: uuidv4 } = require('uuid');
+// const { v4: uuidv4 } = require('uuid');    // ← retire ça
+const { randomUUID } = require('crypto');     // ← built-in Node
 const cors = require('cors');
 
 const app = express();
