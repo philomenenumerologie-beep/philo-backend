@@ -106,7 +106,7 @@ app.get('/api/anon', (req, res) => {
   }
 
   function createAnon(){
-    const id = 'anon-' + uuidv4();
+    const id = 'anon-' + const id = randomUUID();
     db.run(`INSERT INTO users(id,freeRemaining,paidBalance,isAnonymous,createdAt) VALUES (?,?,?,?,?)`,
       [id, FREE_ANON, 0, 1, now()],
       function(err){
