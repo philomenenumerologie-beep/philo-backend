@@ -218,14 +218,14 @@ app.post('/api/use', auth, (req,res)=>{
     });
   });
 });
-
 // 6) Logout
-app.post('/api/logout', auth, (req,res)=>{
+app.post('/api/logout', auth, (req, res) => {
   const token = req.cookies.philo_sess;
-  db.run(`DELETE FROM sessions WHERE token=?`, [token], ()=>{
+  db.run(`DELETE FROM sessions WHERE id=?`, [token], (err) => {
     clearCookie(res, 'philo_sess');
-    res.json({ ok:true });
+    res.json({ ok: true });
   });
-});
+}); // <-- ✅ cette accolade et parenthèse ici
 
-app.listen(PORT, ()=>console.log('✅ Auth/Tokens server running on', PORT));
+// ✅ il faut bien fermer le dernier bloc avant d’écouter le port
+app.listen(PORT, () => console.log(`✅ Auth/Tokens server running on ${PORT}`));
