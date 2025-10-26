@@ -107,15 +107,17 @@ app.get('/api/anon', (req, res) => {
 
 function createAnon(){
   const id = 'anon-' + randomUUID();
-  db.run(`INSERT INTO users(id,freeRemaining,paidBalance,isAnonymous,createdAt) VALUES (?,?,?,?,?)`,
-    [id, FREE_ANON, 0, 1, now()],
+  db.run(
+    `INSERT INTO users(id,freeRemaining,paidBalance,isAnonymous,createdAt)
+     VALUES (?,?,?,?,?)`,
+    [id, FREE_ANON, 0, 1, Date.now()],
     function(err){
       if (err) return res.status(500).json({ error:'db_error', detail:err.message });
       setCookie(res, 'philo_anon', id);
-      return res.json({ ok:true, user:{ id, freeRemaining: FREE_ANON, paidBalance:0, isAnonymous:1 } });
-    });
+      return res.json({ ok:true, user:{ id, freeRemaining: FREE_ANON, paidBalance: 0, isAnonymous: 1 } });
+    }
+  );
 }
-});
 
 // 2) Signup (upgrade anonyme -> compte réel + 2000 tokens)
 //    Si cookie anon présent et encore isAnonymous=1 : on UPGRADE CETTE LIGNE
