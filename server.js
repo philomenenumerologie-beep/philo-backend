@@ -157,7 +157,7 @@ app.post('/api/signup', async (req, res) => {
   }
 
   function createNewUser(email, passHash, resLocal){
-    const id = uuidv4();
+    const id = randomUUID();
     db.run(`INSERT INTO users(id,email,password_hash,freeRemaining,paidBalance,isAnonymous,createdAt) VALUES(?,?,?,?,?,?,?)`,
       [id, email, passHash, FREE_AFTER_SIGNUP, 0, 0, now()],
       function(err){
