@@ -1,9 +1,8 @@
 {
   "name": "philomenia-backend",
   "version": "1.0.0",
-  "description": "Backend Philomenia pay-per-use (tokens packs)",
+  "description": "Backend Philomenia Messenger",
   "main": "server.js",
-  
   "scripts": {
     "start": "node server.js"
   },
@@ -11,11 +10,12 @@
     "node": ">=18"
   },
   "dependencies": {
-  "cors": "2.8.5",
-  "dotenv": "16.4.5",
-  "express": "4.19.2",
-  "sqlite3": "5.1.2",
-  "bcrypt": "5.1.1",
-  "cookie-parser": "1.4.6",
-  "uuid": "9.0.0"
+    "cors": "2.8.5",
+    "dotenv": "16.4.5",
+    "express": "4.19.2",
+    "sqlite3": "5.1.6",
+    "bcrypt": "5.1.1",
+    "cookie-parser": "1.4.6",
+    "uuid": "9.0.0"
+  }
 }
