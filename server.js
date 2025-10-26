@@ -229,3 +229,4 @@ app.post('/api/logout', auth, (req, res) => {
 
 // ✅ il faut bien fermer le dernier bloc avant d’écouter le port
 app.listen(PORT, () => console.log(`✅ Auth/Tokens server running on ${PORT}`));
+}
