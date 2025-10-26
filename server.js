@@ -218,7 +218,7 @@ app.post('/api/use', auth, (req,res)=>{
     });
   });
 });
-PORT}`));
+
 // 6) Logout
 app.post('/api/logout', auth, (req, res) => {
   const token = req.cookies.philo_sess;
