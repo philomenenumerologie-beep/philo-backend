@@ -15,21 +15,26 @@ const FREE_AFTER_SIGNUP = parseInt(process.env.FREE_AFTER_SIGNUP || '2000', 10);
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change_me';
 const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-// ====== App/CORS ======
+// ===== App/CORS =====
 const app = express();
 app.use(express.json());
 app.use(cookieParser(SESSION_SECRET));
 app.set('trust proxy', 1);
 
 const corsOptions = {
-  origin: function (origin, cb) {
-    if (!origin) return cb(null, true); // mobile apps / curl
-    if (ALLOW_ORIGINS.length === 0) return cb(null, true);
+  origin(origin, cb) {
+    if (!origin) return cb(null, true); // autorise app mobile, Postman, etc.
+    if (!ALLOW_ORIGINS || ALLOW_ORIGINS.length === 0) return cb(null, true);
     return cb(null, ALLOW_ORIGINS.includes(origin));
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type'],
 };
+
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // préflight
+// ===== fin CORS =====
 
 // ====== DB ======
 const db = new sqlite3.Database('data.sqlite');
