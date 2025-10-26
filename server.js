@@ -218,6 +218,7 @@ app.post('/api/use', auth, (req,res)=>{
     });
   });
 });
+PORT}`));
 // 6) Logout
 app.post('/api/logout', auth, (req, res) => {
   const token = req.cookies.philo_sess;
@@ -225,8 +226,7 @@ app.post('/api/logout', auth, (req, res) => {
     clearCookie(res, 'philo_sess');
     res.json({ ok: true });
   });
-}); // <-- ✅ cette accolade et parenthèse ici
+});
 
-// ✅ il faut bien fermer le dernier bloc avant d’écouter le port
+// ✅ Il faut bien fermer le dernier bloc avant d’écouter le port
 app.listen(PORT, () => console.log(`✅ Auth/Tokens server running on ${PORT}`));
-}
