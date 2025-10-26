@@ -218,7 +218,6 @@ app.post('/api/use', auth, (req,res)=>{
     });
   });
 });
-
 // 6) Logout
 app.post('/api/logout', auth, (req, res) => {
   const token = req.cookies.philo_sess;
