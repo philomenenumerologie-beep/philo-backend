@@ -12,6 +12,7 @@ app.get("/test", (req, res) => {
 });
 const app = express();
 app.use(express.json());
+app.use(express.static(__dirname));
 app.use(cors({
   origin: ["https://www.philomeneia.com", "https://philomeneia.com"]
 }));
