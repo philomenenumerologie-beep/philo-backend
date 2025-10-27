@@ -90,11 +90,21 @@ function clearCookie(res, name) {
 
 function createSession(res, userId) {
   const token = randomUUID();
-  db.run(`INSERT INTO sessions(id,userId,createdAt) VALUES(?,?,?)`,
+
+  // 1️⃣ Poser le cookie immédiatement
+  setCookie(res, 'philo_sess', token);
+
+  // 2️⃣ Enregistrer la session en base, sans rien renvoyer au client ici
+  db.run(
+    `INSERT INTO sessions(id, userId, createdAt) VALUES(?, ?, ?)`,
     [token, userId, now()],
     (err) => {
-      if (!err) setCookie(res, 'philo_sess', token);
-    });
+      if (err) console.error('Erreur insertion session :', err.message);
+    }
+  );
+
+  // 3️⃣ Retourne le token au besoin (pour debug)
+  return token;
 }
 
 function auth(req, res, next) {
