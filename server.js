@@ -1,343 +1,53 @@
-// server.js — Auth + Tokens (anonyme 1000 → 2000 après inscription)
-require('dotenv').config();
+import express from "express";
+import fetch from "node-fetch";
+import cors from "cors";
 
-const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
-const bcrypt = require('bcryptjs');
-const cookieParser = require('cookie-parser');
-const cors = require('cors');
-const { randomUUID } = require('crypto');
-
-// ====== Config ======
-const PORT = process.env.PORT || 10000;
-const FREE_ANON = parseInt(process.env.FREE_ANON || '1000', 10);
-const FREE_AFTER_SIGNUP = parseInt(process.env.FREE_AFTER_SIGNUP || '2000', 10);
-const SESSION_SECRET = process.env.SESSION_SECRET || 'change_me';
-const ALLOW_ORIGINS = (process.env.ALLOW_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-
-// ===== App/CORS =====
 const app = express();
 app.use(express.json());
-app.use(cookieParser(SESSION_SECRET));
-app.set('trust proxy', 1);
+app.use(cors({
+  origin: ["https://www.philomeneia.com", "https://philomeneia.com"]
+}));
 
-const corsOptions = {
-  origin(origin, cb) {
-    if (!origin) return cb(null, true); // autorise Postman, mobile, etc.
-    if (!ALLOW_ORIGINS || ALLOW_ORIGINS.length === 0) return cb(null, true);
-    if (ALLOW_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(new Error('CORS not allowed for ' + origin));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // préflight
-
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // préflight
-// --- Health check & debug ---
-app.get('/api/health', (req, res) => {
-  res.json({ ok: true, time: Date.now(), origin: req.headers.origin || null });
-});
-// ===== fin CORS =====
-
-// ====== DB ======
-const db = new sqlite3.Database('data.sqlite');
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      email TEXT UNIQUE,
-      password_hash TEXT,
-      freeRemaining INTEGER DEFAULT 0,
-      paidBalance INTEGER DEFAULT 0,
-      isAnonymous INTEGER DEFAULT 1,
-      createdAt INTEGER
-    )
-  `);
-  db.run(`
-    CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      userId TEXT,
-      createdAt INTEGER
-    )
-  `);
+app.get("/", (req, res) => {
+  res.send("OK");
 });
 
-// ====== Helpers ======
-function now() { return Date.now(); }
+app.post("/api/chat", async (req, res) => {
+  const { message } = req.body;
 
-function setCookie(res, name, value, days = 365) {
-  const ms = days * 24 * 60 * 60 * 1000;
-  res.cookie(name, value, {
-    httpOnly: true,
-    sameSite: 'none',
-    secure: true,
-    signed: name === 'philo_sess',
-    maxAge: ms
-  });
-}
-
-function clearCookie(res, name) {
-  res.clearCookie(name, {
-    httpOnly: true,
-    sameSite: 'none',
-    secure: true
-  });
-}
-
-function createSession(res, userId) {
-  const token = randomUUID();
-
-  // 1️⃣ Poser le cookie immédiatement
-  setCookie(res, 'philo_sess', token);
-
-  // 2️⃣ Enregistrer la session en base, sans rien renvoyer au client ici
-  db.run(
-    `INSERT INTO sessions(id, userId, createdAt) VALUES(?, ?, ?)`,
-    [token, userId, now()],
-    (err) => {
-      if (err) console.error('Erreur insertion session :', err.message);
-    }
-  );
-
-  // 3️⃣ Retourne le token au besoin (pour debug)
-  return token;
-}
-
-function auth(req, res, next) {
-  const token = req.signedCookies?.philo_sess;
-  if (!token) return res.status(401).json({ error: 'not_logged_in' });
-  db.get(`SELECT userId FROM sessions WHERE id=?`, [token], (e, row) => {
-    if (e || !row) return res.status(401).json({ error: 'not_logged_in' });
-    db.get(`SELECT * FROM users WHERE id=?`, [row.userId], (e2, u) => {
-      if (e2 || !u) return res.status(401).json({ error: 'not_logged_in' });
-      req.user = u;
-      next();
-    });
-  });
-}
-
-// ====== 0) Start (crée anonyme si pas de cookie) ======
-app.post('/api/start', (req, res) => {
-  const anonCookie = req.cookies?.philo_anon;
-  if (anonCookie) {
-    // Vérifie que l'utilisateur existe
-    db.get(`SELECT * FROM users WHERE id=?`, [anonCookie], (e, u) => {
-      if (!e && u) {
-        return res.json({
-          ok: true,
-          user: {
-            id: u.id,
-            isAnonymous: !!u.isAnonymous,
-            freeRemaining: u.freeRemaining || 0,
-            paidBalance: u.paidBalance || 0
-          }
-        });
-      }
-      return createAnon();
-    });
-  } else {
-    return createAnon();
+  if (!message) {
+    return res.status(400).json({ error: "missing_message" });
+  }
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: "missing_api_key" });
   }
 
-  function createAnon() {
-    const id = 'anon-' + randomUUID();
-    db.run(
-      `INSERT INTO users(id,freeRemaining,paidBalance,isAnonymous,createdAt) VALUES (?,?,?,?,?)`,
-      [id, FREE_ANON, 0, 1, now()],
-      (err) => {
-        if (err) return res.status(500).json({ error: 'db_error', detail: err.message });
-        setCookie(res, 'philo_anon', id);
-        return res.json({
-          ok: true,
-          user: { id, isAnonymous: true, freeRemaining: FREE_ANON, paidBalance: 0 }
-        });
-      }
-    );
-  }
-});
-
-// ====== 1) Login ======
-app.post('/api/login', async (req, res) => {
   try {
-    const { email, password } = req.body || {};
-    if (!email || !password)
-      return res.status(400).json({ error: 'missing_fields' });
-
-    db.get(`SELECT * FROM users WHERE email=? AND isAnonymous=0`, [email], async (e, u) => {
-      if (e || !u) return res.status(400).json({ error: 'invalid_credentials' });
-
-      const ok = await bcrypt.compare(password, u.password_hash || '');
-      if (!ok) return res.status(400).json({ error: 'invalid_credentials' });
-
-      // ✅ attend la création de session avant d’envoyer la réponse
-      await createSession(res, u.id);
-      clearCookie(res, 'philo_anon');
-
-      return res.json({
-        ok: true,
-        freeRemaining: u.freeRemaining || 0,
-        paidBalance: u.paidBalance || 0
-      });
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        messages: [
+          { role: "system", content: "Tu es Philomène, assistant bienveillant." },
+          { role: "user", content: message }
+        ]
+      })
     });
-  } catch (err) {
-    return res.status(500).json({ error: 'server_error', detail: err.message });
+
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content || "Désolé, petite erreur 😅";
+
+    res.json({ reply });
+  } catch (error) {
+    res.status(500).json({ error: "openai_error" });
   }
 });
 
-// ====== 2) Signup (upgrade anonyme → compte réel + 2000) ======
-app.post('/api/signup', async (req, res) => {
-  try {
-    const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: 'missing_fields' });
-    const passHash = await bcrypt.hash(password, 10);
-    const anonId = req.cookies?.philo_anon;
-
-    if (anonId) {
-      // Upgrade l'utilisateur anonyme s'il existe et est encore anonyme
-      db.get(`SELECT id FROM users WHERE id=? AND isAnonymous=1`, [anonId], (e, row) => {
-        if (e) return res.status(500).json({ error: 'db_error', detail: e.message });
-        if (row) {
-          db.run(
-            `UPDATE users SET email=?, password_hash=?, freeRemaining=?, isAnonymous=0 WHERE id=?`,
-            [email, passHash, FREE_AFTER_SIGNUP, anonId],
-            (err) => {
-              if (err) {
-                if (String(err.message).includes('UNIQUE')) {
-                  return res.status(400).json({ error: 'email_taken' });
-                }
-                return res.status(500).json({ error: 'db_error', detail: err.message });
-              }
-              clearCookie(res, 'philo_anon');
-              createSession(res, anonId);
-              return res.json({ ok: true, user: { id: anonId } });
-            }
-          );
-        } else {
-          // cookie invalide → crée un nouveau compte
-          return createNewUser(email, passHash, res);
-        }
-      });
-    } else {
-      // pas de cookie anonyme → nouveau user
-      return createNewUser(email, passHash, res);
-    }
-  } catch (err) {
-    return res.status(500).json({ error: 'server_error', detail: err.message });
-  }
-
-  function createNewUser(email, passHash, resLocal) {
-    const id = randomUUID();
-    db.run(
-      `INSERT INTO users(id,email,password_hash,freeRemaining,paidBalance,isAnonymous,createdAt) VALUES (?,?,?,?,?,?,?)`,
-      [id, email, passHash, FREE_AFTER_SIGNUP, 0, 0, now()],
-      (err) => {
-        if (err) {
-          if (String(err.message).includes('UNIQUE')) {
-            return resLocal.status(400).json({ error: 'email_taken' });
-          }
-          return resLocal.status(500).json({ error: 'db_error', detail: err.message });
-        }
-        createSession(resLocal, id);
-        return resLocal.json({ ok: true, user: { id } });
-      }
-    );
-  }
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log("Philomene backend is running on port", port);
 });
-
-// ====== 3) Me (solde) ======
-app.get('/api/me', auth, (req, res) => {
-  const u = req.user;
-  res.json({
-    id: u.id,
-    email: u.email,
-    isAnonymous: !!u.isAnonymous,
-    freeRemaining: u.freeRemaining || 0,
-    paidBalance: u.paidBalance || 0,
-    totalRemaining: (u.freeRemaining || 0) + (u.paidBalance || 0)
-  });
-});
-
-// ====== 4) Dépenser des tokens ======
-app.post('/api/use', auth, (req, res) => {
-  const cost = parseInt((req.body && req.body.cost) || '0', 10);
-  if (isNaN(cost) || cost <= 0) return res.status(400).json({ error: 'bad_cost' });
-  const uid = req.user.id;
-
-  db.get(`SELECT freeRemaining, paidBalance FROM users WHERE id=?`, [uid], (e, row) => {
-    if (e || !row) return res.status(500).json({ error: 'db_error' });
-
-    let free = row.freeRemaining || 0;
-    let paid = row.paidBalance || 0;
-    if (free + paid < cost) return res.status(400).json({ error: 'not_enough_tokens' });
-
-    if (free >= cost) {
-      free -= cost;
-    } else {
-      const left = cost - free;
-      free = 0;
-      paid = Math.max(0, paid - left);
-    }
-
-    db.run(
-      `UPDATE users SET freeRemaining=?, paidBalance=? WHERE id=?`,
-      [free, paid, uid],
-      (err) => {
-        if (err) return res.status(500).json({ error: 'db_error' });
-        res.json({ ok: true, freeRemaining: free, paidBalance: paid, totalRemaining: free + paid });
-      }
-    );
-  });
-});
-
-// ====== 5) Logout ======
-app.post('/api/logout', auth, (req, res) => {
-  const token = req.signedCookies?.philo_sess;
-  db.run(`DELETE FROM sessions WHERE id=?`, [token], () => {
-    clearCookie(res, 'philo_sess');
-    res.json({ ok: true });
-  });
-});
-
-// === Chat simple + débite les tokens ===
-app.post('/api/chat', auth, (req, res) => {
-  const msg  = (req.body && req.body.message) || '';
-  const cost = 50;
-  const uid  = req.user.id;
-
-  // 1) Lire solde
-  db.get(`SELECT freeRemaining, paidBalance FROM users WHERE id=?`, [uid], (e, row) => {
-    if (e || !row) return res.status(500).json({ error: 'db_error' });
-
-    let free = row.freeRemaining || 0;
-    let paid = row.paidBalance || 0;
-    if (free + paid < cost) return res.status(400).json({ error: 'not_enough_tokens' });
-
-    // 2) Débiter
-    if (free >= cost) free -= cost;
-    else {
-      const left = cost - free;
-      free = 0;
-      paid = Math.max(0, paid - left);
-    }
-
-    db.run(
-      `UPDATE users SET freeRemaining=?, paidBalance=? WHERE id=?`,
-      [free, paid, uid],
-      (err) => {
-        if (err) return res.status(500).json({ error: 'db_error' });
-
-        // 3) Réponse "placeholder"
-        const reply = msg ? `Tu as dit : ${msg}` : '...';
-        return res.json({ ok: true, reply, freeRemaining: free, paidBalance: paid });
-      }
-    );
-  });
-});
-
-// ===== Start server =====
-app.listen(PORT, () => console.log(`✅ Auth/Tokens server running on ${PORT}`));
- 
