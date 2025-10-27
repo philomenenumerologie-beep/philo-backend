@@ -301,6 +301,11 @@ app.post('/api/logout', auth, (req, res) => {
     res.json({ ok: true });
   });
 });
-
+// ====== Chat (placeholder pour tests) ======
+app.post('/api/chat', (req, res) => {
+  const msg = (req.body && req.body.message) || '';
+  // Réponse simple pour tester la communication
+  res.json({ ok: true, reply: msg ? `Tu as dit : ${msg}` : 'Salut 👋' });
+});
 // ====== Start server ======
 app.listen(PORT, () => console.log(`✅ Auth/Tokens server running on ${PORT}`));
