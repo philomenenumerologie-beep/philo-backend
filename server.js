@@ -301,11 +301,30 @@ app.post('/api/logout', auth, (req, res) => {
     res.json({ ok: true });
   });
 });
-// ====== Chat (placeholder pour tests) ======
-app.post('/api/chat', (req, res) => {
-  const msg = (req.body && req.body.message) || '';
-  // Réponse simple pour tester la communication
-  res.json({ ok: true, reply: msg ? `Tu as dit : ${msg}` : 'Salut 👋' });
+));
+// === Chat simple + débite les tokens ===
+app.post('/api/chat', auth, (req, res) => {
+  const msg = (req.body && req.body.message || '').trim();
+  const cost = 50;                   // même coût qu'avant
+  const uid  = req.user.id;
+
+  // 1) Lire solde
+  db.get(`SELECT freeRemaining, paidBalance FROM users WHERE id=?`, [uid], (e, row) => {
+    if (e || !row) return res.status(500).json({ error: 'db_error' });
+
+    let free = row.freeRemaining || 0;
+    let paid = row.paidBalance || 0;
+    if (free + paid < cost) return res.status(400).json({ error: 'not_enough_tokens' });
+
+    // 2) Débiter
+    if (free >= cost) free -= cost; else { const left = cost - free; free = 0; paid = Math.max(0, paid - left); }
+
+    db.run(`UPDATE users SET freeRemaining=?, paidBalance=? WHERE id=?`, [free, paid, uid], (err) => {
+      if (err) return res.status(500).json({ error: 'db_error' });
+
+      // 3) Réponse “bidon” (placeholder)
+      const reply = msg ? `Tu as dit : ${msg}` : 'Salut 👋';
+      res.json({ ok: true, reply, freeRemaining: free, paidBalance: paid });
+    });
+  });
 });
-// ====== Start server ======
-app.listen(PORT, () => console.log(`✅ Auth/Tokens server running on ${PORT}`));
