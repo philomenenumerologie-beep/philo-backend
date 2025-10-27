@@ -295,7 +295,7 @@ app.post('/api/use', auth, (req, res) => {
 
 // ====== 5) Logout ======
 app.post('/api/logout', auth, (req, res) => {
-  const token = req.signedCookies.philo_sess;
+  const token = req.signedCookies?.philo_sess;
   db.run(`DELETE FROM sessions WHERE id=?`, [token], () => {
     clearCookie(res, 'philo_sess');
     res.json({ ok: true });
@@ -304,8 +304,8 @@ app.post('/api/logout', auth, (req, res) => {
 
 // === Chat simple + débite les tokens ===
 app.post('/api/chat', auth, (req, res) => {
-  const msg = (req.body && req.body.message || '').trim();
-  const cost = 50;                   // même coût qu'avant
+  const msg  = (req.body && req.body.message) || '';
+  const cost = 50;
   const uid  = req.user.id;
 
   // 1) Lire solde
@@ -317,14 +317,22 @@ app.post('/api/chat', auth, (req, res) => {
     if (free + paid < cost) return res.status(400).json({ error: 'not_enough_tokens' });
 
     // 2) Débiter
-    if (free >= cost) free -= cost; else { const left = cost - free; free = 0; paid = Math.max(0, paid - left); }
+    if (free >= cost) free -= cost;
+    else { const left = cost - free; free = 0; paid = Math.max(0, paid - left); }
 
-    db.run(`UPDATE users SET freeRemaining=?, paidBalance=? WHERE id=?`, [free, paid, uid], (err) => {
-      if (err) return res.status(500).json({ error: 'db_error' });
+    db.run(
+      `UPDATE users SET freeRemaining=?, paidBalance=? WHERE id=?`,
+      [free, paid, uid],
+      (err) => {
+        if (err) return res.status(500).json({ error: 'db_error' });
 
-      // 3) Réponse “bidon” (placeholder)
-      const reply = msg ? `Tu as dit : ${msg}` : 'Salut 👋';
-      res.json({ ok: true, reply, freeRemaining: free, paidBalance: paid });
-    });
+        // 3) Réponse placeholder
+        const reply = msg ? `Tu as dit : ${msg}` : '…';
+        return res.json({ ok: true, reply, freeRemaining: free, paidBalance: paid });
+      }
+    );
   });
 });
+
+// ===== Start server =====
+app.listen(PORT, () => console.log(`✅ Auth/Tokens server running on ${PORT}`)); 
