@@ -23,14 +23,17 @@ app.set('trust proxy', 1);
 
 const corsOptions = {
   origin(origin, cb) {
-    if (!origin) return cb(null, true); // autorise app mobile, Postman, etc.
+    if (!origin) return cb(null, true); // autorise Postman, mobile, etc.
     if (!ALLOW_ORIGINS || ALLOW_ORIGINS.length === 0) return cb(null, true);
-    return cb(null, ALLOW_ORIGINS.includes(origin));
+    if (ALLOW_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error('CORS not allowed for ' + origin));
   },
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
 };
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // préflight
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions)); // préflight
