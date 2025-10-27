@@ -164,15 +164,20 @@ app.post('/api/start', (req, res) => {
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ error: 'missing_fields' });
+    if (!email || !password)
+      return res.status(400).json({ error: 'missing_fields' });
 
     db.get(`SELECT * FROM users WHERE email=? AND isAnonymous=0`, [email], async (e, u) => {
       if (e || !u) return res.status(400).json({ error: 'invalid_credentials' });
+
       const ok = await bcrypt.compare(password, u.password_hash || '');
       if (!ok) return res.status(400).json({ error: 'invalid_credentials' });
-      createSession(res, u.id);
+
+      // ✅ attend la création de session avant d’envoyer la réponse
+      await createSession(res, u.id);
       clearCookie(res, 'philo_anon');
-      res.json({
+
+      return res.json({
         ok: true,
         freeRemaining: u.freeRemaining || 0,
         paidBalance: u.paidBalance || 0
