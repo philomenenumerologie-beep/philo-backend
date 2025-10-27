@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Test Chat API</title>
+</head>
+<body style="font-family:sans-serif;">
+<h2>Parler à Philomène 👋</h2>
+<input id="msg" placeholder="Ton message..." style="width:80%;padding:10px;font-size:18px;" />
+<button onclick="sendMsg()" style="padding:10px 20px;font-size:18px;">Envoyer</button>
+<pre id="res" style="margin-top:20px;font-size:18px;white-space:pre-wrap;"></pre>
+
+<script>
+async function sendMsg() {
+  const message = document.getElementById("msg").value;
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message })
+  });
+  document.getElementById("res").textContent = await res.text();
+}
+</script>
+</body>
+</html>
