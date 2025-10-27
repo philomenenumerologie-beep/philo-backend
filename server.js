@@ -301,7 +301,7 @@ app.post('/api/logout', auth, (req, res) => {
     res.json({ ok: true });
   });
 });
-));
+
 // === Chat simple + débite les tokens ===
 app.post('/api/chat', auth, (req, res) => {
   const msg = (req.body && req.body.message || '').trim();
