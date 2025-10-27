@@ -318,7 +318,11 @@ app.post('/api/chat', auth, (req, res) => {
 
     // 2) Débiter
     if (free >= cost) free -= cost;
-    else { const left = cost - free; free = 0; paid = Math.max(0, paid - left); }
+    else {
+      const left = cost - free;
+      free = 0;
+      paid = Math.max(0, paid - left);
+    }
 
     db.run(
       `UPDATE users SET freeRemaining=?, paidBalance=? WHERE id=?`,
@@ -326,8 +330,8 @@ app.post('/api/chat', auth, (req, res) => {
       (err) => {
         if (err) return res.status(500).json({ error: 'db_error' });
 
-        // 3) Réponse placeholder
-        const reply = msg ? `Tu as dit : ${msg}` : '…';
+        // 3) Réponse "placeholder"
+        const reply = msg ? `Tu as dit : ${msg}` : '...';
         return res.json({ ok: true, reply, freeRemaining: free, paidBalance: paid });
       }
     );
@@ -335,4 +339,5 @@ app.post('/api/chat', auth, (req, res) => {
 });
 
 // ===== Start server =====
-app.listen(PORT, () => console.log(`✅ Auth/Tokens server running on ${PORT}`)); 
+app.listen(PORT, () => console.log(`✅ Auth/Tokens server running on ${PORT}`));
+ 
