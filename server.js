@@ -32,22 +32,21 @@ app.post("/api/chat", async (req, res) => {
       body: JSON.stringify({
         model: "gpt-4.1-mini",
         messages: [
-          { role: "system", content: "Tu es Philomène, assistant bienveillant." },
+          { role: "system", content: "Tu es Philomène, assistant francophone. Réponds clairement et utilement." },
           { role: "user", content: message }
         ]
       })
     });
 
     const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content || "Désolé, petite erreur 😅";
-
+    const reply = data?.choices?.[0]?.message?.content || "Désolé, petite erreur 😅";
     res.json({ reply });
-  } catch (error) {
+  } catch (e) {
     res.status(500).json({ error: "openai_error" });
   }
 });
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log("Philomene backend is running on port", port);
+  console.log("Philomene backend is running on", port);
 });
