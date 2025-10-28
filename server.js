@@ -1,34 +1,29 @@
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
-import path from "path";
-import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-app.get("/test", (req, res) => {
-  res.sendFile(path.join(__dirname, "test.html"));
-});
 const app = express();
 app.use(express.json());
-app.use(express.static(__dirname));
+
 app.use(cors({
-  origin: ["https://www.philomeneia.com", "https://philomeneia.com"]
+  origin: ["https://philomeneia.com", "https://www.philomeneia.com"]
 }));
 
+// Vérification que l’API tourne
 app.get("/", (req, res) => {
-  res.send("OK");
+  res.send("API Philomenia OK");
 });
 
+// Route principale pour discuter avec l’IA
 app.post("/api/chat", async (req, res) => {
   const { message } = req.body;
 
   if (!message) {
-    return res.status(400).json({ error: "missing_message" });
+    return res.status(400).json({ error: "Missing message text" });
   }
+
   if (!process.env.OPENAI_API_KEY) {
-    return res.status(500).json({ error: "missing_api_key" });
+    return res.status(500).json({ error: "API key missing" });
   }
 
   try {
@@ -39,23 +34,28 @@ app.post("/api/chat", async (req, res) => {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        messages: [
-          { role: "system", content: "Tu es Philomène, assistant francophone. Réponds clairement et utilement." },
-          { role: "user", content: message }
-        ]
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: message }]
       })
     });
 
     const data = await response.json();
-    const reply = data?.choices?.[0]?.message?.content || "Désolé, petite erreur 😅";
+
+    if (data.error) {
+      console.error(data.error);
+      return res.status(500).json({ error: data.error.message });
+    }
+
+    const reply = data.choices?.[0]?.message?.content || "Réponse vide";
     res.json({ reply });
-  } catch (e) {
-    res.status(500).json({ error: "openai_error" });
+
+  } catch (err) {
+    res.status(500).json({ error: "Request failed", details: err.message });
   }
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log("Philomene backend is running on", port);
+// Port Render
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`Philomenia backend is running on port ${PORT}`);
 });
