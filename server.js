@@ -134,6 +134,13 @@ app.post("/api/login", async (req, res) => {
 // -------------------------
 // CHAT (invite ou connecté)
 // -------------------------
+app.get("/config", (req, res) => {
+  res.json({
+    paymentEnabled: process.env.PAYMENT_ENABLED === "true",
+    freeAnon: parseInt(process.env.FREE_ANON || "1000", 10),
+    freeAfterSignup: parseInt(process.env.FREE_AFTER_SIGNUP || "2000", 10),
+  });
+});
 app.post("/api/chat", async (req, res) => {
   const { message } = req.body || {};
   if (!message || typeof message !== "string") {
