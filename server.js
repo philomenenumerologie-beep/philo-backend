@@ -1,120 +1,161 @@
+/* ===============================
+   Philomenia – Backend complet
+   =============================== */
+
 import express from "express";
 import fetch from "node-fetch";
 import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// Sécurité sessions + tokens de connexion
 import jwt from "jsonwebtoken";
 import { Resend } from "resend";
+import { Webhook } from "svix"; // vérification Clerk Webhooks
 
+// ---------- Utils de chemin
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ---------- App
 const app = express();
-app.use(express.json());
 
-// ✅ CORS sécurisé
-const allowedOrigins = JSON.parse(process.env.ALLOW_ORIGINS || "[]");
+// ---------- CORS sécurisé
+const allowedOrigins = (() => {
+  try {
+    return JSON.parse(process.env.ALLOWED_ORIGINS || "[]");
+  } catch {
+    return [];
+  }
+})();
 app.use(
   cors({
-    origin: allowedOrigins,
-    credentials: true
+    origin: (origin, cb) => {
+      // autorise requêtes server-to-server / local sans origin
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error("Origin not allowed by CORS"));
+    },
+    credentials: true,
   })
 );
 
-// ✅ RESEND init
+// Le JSON parser global (⚠️ le webhook aura son propre parser raw)
+app.use(express.json());
+
+// ---------- Resend (optionnel)
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// ✅ Page test
-app.get("/", (req, res) => {
+// =====================
+// Routes de test / util
+// =====================
+
+app.get("/", (_req, res) => {
   res.send("API Philomenia OK");
 });
 
-// ✅ Vérifier solde
-app.get("/balance", (req, res) => {
+app.get("/balance", (_req, res) => {
   res.json({
-    free: Number(process.env.FREE_ANON || 1000),
-    paid: 0,
-    total: Number(process.env.FREE_ANON || 1000),
-    mode: "guest"
+    free: Number(process.env.FREE_ANON_CREDITS || 5000),
+    paid: Number(process.env.PAID_CREDITS || 0),
   });
 });
 
-// ✅ Config publique pour le front
-app.get("/config", (req, res) => {
-  res.json({
-    paymentEnabled: process.env.PAYMENT_ENABLED === "true",
-    freeAnon: Number(process.env.FREE_ANON || 1000),
-    freeAfterSignup: Number(process.env.FREE_AFTER_SIGNUP || 2000),
-  });
-});
+// ===================================
+// Webhook Clerk : créditer 5000 tokens
+// ===================================
+// Important : route AVANT app.listen ; parser RAW uniquement pour CE endpoint
+app.post(
+  "/webhooks/clerk",
+  express.raw({ type: "*/*" }),
+  async (req, res) => {
+    try {
+      const signingSecret = process.env.CLERK_WEBHOOK_SECRET;
+      if (!signingSecret) {
+        console.error("❌ CLERK_WEBHOOK_SECRET manquant");
+        return res.status(500).send("Server misconfigured");
+      }
 
-// ✅ LOGIN PAR EMAIL → ENVOI CODE
-app.post("/auth/request-code", async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: "Email manquant" });
+      // Vérifie la signature Svix (format Clerk)
+      const wh = new Webhook(signingSecret);
 
-  const token = jwt.sign(
-    { email },
-    process.env.SESSION_SECRET,
-    { expiresIn: "15m" }
-  );
+      // req.body est un Buffer à cause de express.raw
+      const evt = wh.verify(req.body, req.headers);
 
-  const magicUrl = `${process.env.PUBLIC_API_URL}/auth/verify?token=${token}`;
+      const { type, data } = evt;
 
-  try {
-    await resend.emails.send({
-      from: process.env.EMAIL_FROM,
-      to: email,
-      subject: "Votre accès Philomenia 🪄",
-      html: `<p>Cliquez ici pour vous connecter :</p>
-             <a href="${magicUrl}">${magicUrl}</a>`
-    });
+      // On réagit créa d’utilisateur
+      if (type === "user.created") {
+        const userId = data?.id;
+        const email =
+          data?.email_addresses?.[0]?.email_address ??
+          data?.primary_email_address_id ??
+          "unknown";
 
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: "Erreur d’envoi email" });
+        // TODO: ici, mets à jour ta base (ou KV, ou Supabase) :
+        // addCredits(userId, 5000)
+
+        console.log("🎉 user.created", { userId, email });
+        console.log("🎁 5000 tokens ajoutés (à implémenter côté stockage)");
+      }
+
+      res.status(200).send("OK");
+    } catch (err) {
+      console.error("❌ Erreur webhook Clerk:", err?.message || err);
+      res.status(400).send("Bad webhook");
+    }
   }
-});
+);
 
-// ✅ VÉRIFICATION DU CODE → CONNECTÉ ✅
-app.get("/auth/verify", (req, res) => {
-  const { token } = req.query;
-  try {
-    jwt.verify(token, process.env.SESSION_SECRET);
-    res.send("<h2>Connexion réussie ✅ Vous pouvez retourner sur l'app.</h2>");
-  } catch (err) {
-    res.status(400).send("Lien expiré ❌");
-  }
-});
-
-// ✅ CHAT GPT-4
+// ===================================
+// Chat OpenAI – simple proxy backend
+// ===================================
 app.post("/api/chat", async (req, res) => {
-  const { message } = req.body;
-  if (!message) return res.status(400).json({ error: "Missing message" });
-
   try {
+    const { message } = req.body || {};
+    if (!message) return res.status(400).json({ error: "Message manquant" });
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "OPENAI_API_KEY manquant" });
+
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_MODEL,
-        messages: [{ role: "user", content: message }],
+        model,
+        messages: [
+          { role: "system", content: "Tu es l’assistant de Philomenia." },
+          { role: "user", content: message },
+        ],
       }),
     });
 
+    if (!response.ok) {
+      const text = await response.text();
+      console.error("OpenAI error:", text);
+      return res.status(500).json({ error: "OpenAI request failed" });
+    }
+
     const data = await response.json();
-    res.json({ reply: data?.choices?.[0]?.message?.content || "Erreur modèle" });
+    const reply =
+      data?.choices?.[0]?.message?.content?.trim?.() ||
+      "(pas de réponse)";
+
+    res.json({ reply });
   } catch (err) {
-    res.status(500).json({ error: "Erreur GPT" });
+    console.error("❌ /api/chat error:", err?.message || err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
+// ===================================
+// Lancement
+// ===================================
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () =>
-  console.log("✅ Backend Philomenia running on port", PORT)
-);
+app.listen(PORT, () => {
+  console.log(`✅ Backend Philomenia prêt sur port ${PORT}`);
+});
