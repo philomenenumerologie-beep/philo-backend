@@ -1,174 +1,208 @@
-// server.js — Philomène IA (backend complet)
-// CORS robuste • Solde tokens • Chat texte+photo (vision) • Offres tokens (simu PayPal)
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
+import multer from "multer";
 import fetch from "node-fetch";
+import dotenv from "dotenv";
+import OpenAI from "openai";
+
 dotenv.config();
 
+const {
+  OPENAI_API_KEY,
+  ALLOW_ORIGINS = "",
+  PORT = 10000,
+  FREE_AFTER_SIGNUP = "5000",
+  FREE_ANON = "1000",
+} = process.env;
+
 const app = express();
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: "2mb" }));
 
-// ===== CORS
-const rawAllow = process.env.ALLOW_ORIGINS || "";
-const allowedHosts = rawAllow
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean)
-  .map(u => { try { return new URL(u).hostname.toLowerCase(); } catch { return null; } })
-  .filter(Boolean);
-const stripWww = h => h.replace(/^www\./, "");
-const hostFromOrigin = o => { try { return new URL(o).hostname.toLowerCase(); } catch { return ""; } };
+// CORS dynamique
+const allowedOrigins = ALLOW_ORIGINS.split(",").map(s => s.trim()).filter(Boolean);
+app.use(
+  cors({
+    origin: function (origin, cb) {
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      console.log("❌ CORS blocked:", origin);
+      return cb(new Error("Not allowed by CORS"));
+    },
+  })
+);
 
-app.use(cors({
-  origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    const h = hostFromOrigin(origin);
-    const ok = allowedHosts.includes(h) || allowedHosts.map(stripWww).includes(stripWww(h));
-    if (ok) return cb(null, true);
-    console.log("❌ CORS blocked:", origin, "allowed:", allowedHosts);
-    cb(new Error("Not allowed by CORS"));
-  },
-  methods: ["GET","POST","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization"]
-}));
-app.options("*", cors());
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } }); // 8MB
 
-// ===== “DB” en mémoire
-const DEFAULT_FREE = Number(process.env.FREE_AFTER_SIGNUP || 5000);
-const DEFAULT_ANON = Number(process.env.FREE_ANON || 0);
+// OpenAI client
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// email -> { free, paid, greeted }
-const users = new Map();
-const getUser = (email) => {
-  const key = (email || "").toLowerCase().trim();
-  if (!users.has(key)) users.set(key, { free: key ? DEFAULT_FREE : DEFAULT_ANON, paid: 0, greeted: false });
-  return users.get(key);
-};
-const total = (u) => (u.free || 0) + (u.paid || 0);
-const consume = (u, n) => {
-  let rest = n;
-  if (u.paid >= rest) { u.paid -= rest; rest = 0; }
-  else { rest -= u.paid; u.paid = 0; if (u.free >= rest) { u.free -= rest; rest = 0; } }
-  return rest === 0;
+// Helpers
+const ok = (res, data) => res.json(data);
+const fail = (res, e, code = 500) => {
+  console.error(e?.stack || e);
+  res.status(code).json({ error: e?.message || "Server error" });
 };
 
-// ===== OpenAI
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL   = process.env.OPENAI_MODEL   || "gpt-4o-mini";
-
-async function callOpenAI({ systemPrompt, userText, images = [] }) {
-  const content = [];
-  if (userText?.trim()) content.push({ type: "text", text: userText.trim() });
-  for (const dataUrl of images) content.push({ type: "image_url", image_url: { url: dataUrl } });
-
-  if (!OPENAI_API_KEY) {
-    const fake = images.length ? "J’ai bien reçu ta photo. (Mode test sans clé OpenAI)"
-                               : "Réponse de test (pas de clé OpenAI configurée).";
-    return { reply: fake, tokensUsed: 50 };
-  }
-
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      temperature: 0.4,
-      messages: [
-        { role: "system",
-          content: systemPrompt
-        },
-        { role: "user",
-          content: content.length ? content : [{ type: "text", text: userText || "" }]
-        }
-      ]
-    })
-  });
-  if (!r.ok) throw new Error(await r.text());
-  const data = await r.json();
-  const reply = data?.choices?.[0]?.message?.content?.trim() || "Je n’ai rien reçu, réessaie.";
-  const used = data?.usage?.total_tokens ??
-               ((data?.usage?.prompt_tokens || 0) + (data?.usage?.completion_tokens || 0)) ||
-               120;
-  return { reply, tokensUsed: used };
+// —————————————————— Mini “browsing” très simple ——————————————————
+// On utilise un fetch en lecture publique (r.jina.ai) pour récupérer un texte récent
+// et on l’injecte comme "contexte web" au modèle.
+async function webContextFrom(url) {
+  const u = `https://r.jina.ai/http://` + url.replace(/^https?:\/\//, "");
+  const r = await fetch(u, { timeout: 10_000 });
+  if (!r.ok) throw new Error(`Web fetch failed: ${r.status}`);
+  return await r.text();
 }
 
-// ===== Routes
-app.get("/", (_req, res) => res.send("✅ API en ligne"));
+async function smartNewsContext(userMsg) {
+  // Quelques URLs génériques utiles quand on pose des questions d’actualité FR
+  // Tu peux élargir la liste si tu veux
+  const candidates = [
+    "en.wikipedia.org/wiki/Prime_Minister_of_France",
+    "en.wikipedia.org/wiki/Government_of_France",
+    "news.google.com/rss/search?q=site:gov.fr",
+  ];
+
+  // Si on détecte des mots-clés, on priorise une page
+  const m = userMsg.toLowerCase();
+  if (m.includes("premier ministre") || m.includes("première ministre")) {
+    candidates.unshift("en.wikipedia.org/wiki/Prime_Minister_of_France");
+  }
+
+  // On essaie 1 ou 2 sources max pour rester léger
+  const take = candidates.slice(0, 2);
+  const texts = [];
+  for (const url of take) {
+    try {
+      const t = await webContextFrom(url);
+      texts.push(`SOURCE: ${url}\n${t.slice(0, 12000)}`); // limite pour ne pas exploser le contexte
+    } catch (e) {
+      console.warn("web fetch fail:", url, e.message);
+    }
+  }
+  if (!texts.length) return null;
+  return texts.join("\n\n––––––––––––––––––––––––––––––––\n\n");
+}
+
+// —————————————————— Routes ——————————————————
+
+app.get("/", (req, res) => res.send("✅ Philomenia API en ligne"));
 
 app.get("/api/balance", (req, res) => {
-  const email = String(req.query.email || "");
-  const u = getUser(email);
-  res.json({ free: u.free, paid: u.paid });
+  // maquette simple (à connecter à ta DB plus tard)
+  ok(res, { free: Number(FREE_AFTER_SIGNUP), paid: 0 });
 });
 
-// Recharge “offre” (simu PayPal) : ajoute des tokens payants
-// body: { email, amount }  amount > 0
-app.post("/api/topup_custom", (req, res) => {
-  const { email, amount } = req.body || {};
-  const amt = Number(amount || 0);
-  if (!email || !amt || amt <= 0) return res.status(400).json({ error: "Paramètres invalides" });
-  const u = getUser(email);
-  u.paid += amt;
-  return res.json({ ok: true, free: u.free, paid: u.paid, added: amt });
-});
-
-// Petit topup “bonus”
-app.post("/api/topup", (req, res) => {
-  const { email } = req.body || {};
-  const u = getUser(email || "");
-  const bonus = Number(process.env.TOPUP_AMOUNT || 1000);
-  u.free += bonus;
-  res.json({ ok: true, free: u.free, paid: u.paid, added: bonus });
-});
-
+// Chat texte, avec “actu” auto si on détecte une question potentiellement fraîche
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, email, first, images } = req.body || {};
-    if ((!message || !message.trim()) && (!images || !images.length)) {
-      return res.status(400).json({ error: "Message ou image requis" });
-    }
-    const u = getUser(email || "");
-
-    // Style présent + prudence actu
-    const systemPrompt = `
-Tu es Philomène IA, assistant personnel polyvalent, clair et chaleureux. Langue de l’utilisateur.
-Parle **au présent**. Quand l’information est sujette à changement (actualité, sport, gouvernement, prix, météo),
-formule au présent **avec prudence** et transparence: 
-- "À ma dernière mise à jour de connaissances, c’était … ; cela peut avoir changé récemment."
-- Propose si utile de vérifier sur une source récente.
-Donne des réponses concrètes et actionnables.`;
-
-    let userText = message || "";
-    if (first && u.greeted !== true) {
-      userText = "Bonjour 👋 Je suis Philomène IA, ton assistante perso. " +
-                 "Pose ta question ou envoie une photo, je m’occupe du reste.\n\n" +
-                 (message || "");
-      u.greeted = true;
+    const { message, email, force_browse = false } = req.body || {};
+    if (!message || typeof message !== "string") {
+      return fail(res, new Error("Paramètre 'message' manquant"), 400);
     }
 
-    const { reply, tokensUsed } = await callOpenAI({
-      systemPrompt,
-      userText,
-      images: Array.isArray(images) ? images : []
+    // Détecter si le user demande de l’actu
+    const msg = message.trim();
+    const askFresh =
+      force_browse ||
+      /\b(aujourd'hui|actuel|actuellement|en ce moment|202\d|202[45]|qui est|derni(ères|er)|news|actualité)\b/i.test(
+        msg
+      );
+
+    let webContext = null;
+    if (askFresh) {
+      try {
+        webContext = await smartNewsContext(msg);
+      } catch (e) {
+        console.warn("news context failed:", e.message);
+      }
+    }
+
+    const system = [
+      {
+        role: "system",
+        content:
+          "Tu es Philomène, assistante personnelle. Donne des réponses utiles, claires et fiables." +
+          " Date actuelle: " +
+          new Date().toLocaleString("fr-FR", { timeZone: "Europe/Paris" }) +
+          ". Si la question semble liée à l'actualité, utilise le contexte web fourni si présent. " +
+          "Quand tu n'es pas certain, annonce l'incertitude plutôt que d'inventer. " +
+          "Écris en français par défaut. Reste concise.",
+      },
+    ];
+
+    const userParts = [{ type: "text", text: msg }];
+
+    const messages = [
+      ...system,
+      ...(webContext
+        ? [
+            {
+              role: "system",
+              content:
+                "CONTEXTE_WEB (résumé brut non vérifié, ne cite pas textuellement si tu n'es pas sûr):\n" +
+                webContext,
+            },
+          ]
+        : []),
+      { role: "user", content: userParts },
+    ];
+
+    const resp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages,
+      temperature: 0.3,
     });
 
-    if (total(u) < tokensUsed) {
-      return res.status(402).json({ error: "Crédits insuffisants", needed: tokensUsed, free: u.free, paid: u.paid });
-    }
-    consume(u, tokensUsed);
-
-    res.json({ reply, tokensUsed, balance: { free: u.free, paid: u.paid } });
+    const reply = resp.choices?.[0]?.message?.content?.toString().trim() || "Réponse reçue.";
+    ok(res, { reply });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Erreur serveur" });
+    fail(res, e);
   }
 });
 
-app.use((_req, res) => res.status(404).json({ error: "Route non trouvée" }));
+// Analyse d’image (A+B+C+D+E): /api/photo (multipart form-data: field "photo")
+app.post("/api/photo", upload.single("photo"), async (req, res) => {
+  try {
+    if (!req.file) return fail(res, new Error("Aucun fichier reçu (champ 'photo')"), 400);
 
-const PORT = process.env.PORT || 10000;
+    const mime = req.file.mimetype || "image/jpeg";
+    const base64 = req.file.buffer.toString("base64");
+    const dataUrl = `data:${mime};base64,${base64}`;
+
+    const instruction =
+      (req.body?.instruction ||
+        "Analyse cette image. 1) Décris la scène/objets. 2) Si c'est une panne/erreur, donne un diagnostic." +
+          " 3) Si du texte est présent, fais l'OCR. 4) Termine par des conseils actionnables.") + "";
+
+    const messages = [
+      {
+        role: "system",
+        content:
+          "Tu es Philomène vision. Donne une analyse fiable, précise et pratique. Structure en points courts.",
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: instruction },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ],
+      },
+    ];
+
+    const resp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages,
+      temperature: 0.2,
+    });
+
+    const reply = resp.choices?.[0]?.message?.content?.toString().trim() || "Analyse terminée.";
+    ok(res, { reply });
+  } catch (e) {
+    fail(res, e);
+  }
+});
+
+// —————————————————— Lancement ——————————————————
 app.listen(PORT, () => {
-  console.log("✅ Backend Philomène IA en ligne sur port", PORT);
-  console.log("ALLOW_ORIGINS =", rawAllow);
+  console.log(`✅ Philomenia API running on port ${PORT}`);
 });
