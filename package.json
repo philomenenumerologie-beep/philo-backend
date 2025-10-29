@@ -8,11 +8,11 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "node-fetch": "^3.3.2",
     "resend": "^3.3.0",
-    "svix": "^1.20.0",
-    "dotenv": "^16.4.5"
+    "svix": "^1.20.0"
   }
 }
