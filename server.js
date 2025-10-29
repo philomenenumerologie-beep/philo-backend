@@ -1,4 +1,5 @@
 // server.js — Philomène IA (backend complet)
+// Fonctions : CORS robuste • Solde tokens (mémoire) • Chat texte+photo (vision) • Recharge factice
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -6,9 +7,9 @@ import fetch from "node-fetch"; // utile si Node < 22
 dotenv.config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "25mb" })); // pour images base64
 
-// ===== CORS robuste (gère espaces, www., et erreurs de frappe) =====
+// ===== CORS robuste (gère www., espaces, retours à la ligne) =====
 const rawAllow = process.env.ALLOW_ORIGINS || "";
 const allowedHosts = rawAllow
   .split(",")
@@ -42,8 +43,10 @@ app.use(cors({
 app.options("*", cors());
 
 // ===== "Base" en mémoire (simple pour la bêta) =====
-const DEFAULT_FREE = Number(process.env.FREE_AFTER_SIGNUP || 2500);
+const DEFAULT_FREE = Number(process.env.FREE_AFTER_SIGNUP || 5000);
 const DEFAULT_ANON = Number(process.env.FREE_ANON || 0);
+const TOPUP_AMOUNT = Number(process.env.TOPUP_AMOUNT || 1000);
+
 // Map email -> { free, paid, greeted }
 const users = new Map();
 
@@ -57,6 +60,7 @@ function getUser(email) {
 function totalBalance(u) { return (u.free || 0) + (u.paid || 0); }
 function consume(u, n) {
   let rest = n;
+  // on consomme d'abord le payant (tu peux inverser si tu préfères)
   if (u.paid >= rest) { u.paid -= rest; rest = 0; }
   else {
     rest -= u.paid; u.paid = 0;
@@ -65,17 +69,38 @@ function consume(u, n) {
   return rest === 0;
 }
 
-// ===== Helpers OpenAI =====
+// ===== OpenAI =====
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-async function callOpenAI(messages) {
-  if (!OPENAI_API_KEY) {
-    // Mode dégradé si pas de clé: réponse fixe
-    return {
-      reply: "Réponse de test (aucune clé OpenAI configurée).",
-      tokensUsed: 50
-    };
+
+// Appel OpenAI (texte seul OU texte+images via content[]).
+async function callOpenAI({ systemPrompt, userText, images = [] }) {
+  // messages → content (pour gpt-4o-mini vision)
+  const msgUserParts = [];
+  if (userText && userText.trim()) {
+    msgUserParts.push({ type: "text", text: userText.trim() });
   }
+  for (const dataUrl of images) {
+    // dataUrl = "data:image/...;base64,AAAA"
+    msgUserParts.push({ type: "image_url", image_url: { url: dataUrl } });
+  }
+
+  if (!OPENAI_API_KEY) {
+    // Mode dégradé si pas de clé
+    const fake = images.length
+      ? "J’ai bien reçu ta photo. (Mode test sans clé OpenAI)"
+      : "Réponse de test (aucune clé OpenAI configurée).";
+    return { reply: fake, tokensUsed: 50 };
+  }
+
+  const body = {
+    model: OPENAI_MODEL,
+    temperature: 0.4,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: msgUserParts.length ? msgUserParts : [{ type: "text", text: userText || "" }] }
+    ]
+  };
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -83,11 +108,7 @@ async function callOpenAI(messages) {
       "Authorization": `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      temperature: 0.4,
-      messages
-    })
+    body: JSON.stringify(body)
   });
 
   if (!r.ok) {
@@ -98,67 +119,65 @@ async function callOpenAI(messages) {
 
   const data = await r.json();
   const reply = data?.choices?.[0]?.message?.content?.trim() || "Je n’ai rien reçu, réessaie.";
-  const used = data?.usage?.total_tokens ?? (
-    (data?.usage?.prompt_tokens || 0) + (data?.usage?.completion_tokens || 0)
-  ) || 120; // fallback au cas où
-
+  const used = data?.usage?.total_tokens ??
+               ((data?.usage?.prompt_tokens || 0) + (data?.usage?.completion_tokens || 0)) ||
+               120; // fallback
   return { reply, tokensUsed: used };
 }
 
 // ===== Routes =====
 app.get("/", (_req, res) => res.send("✅ API en ligne"));
 
-// Solde utilisateur
 app.get("/api/balance", (req, res) => {
   const email = String(req.query.email || "");
   const u = getUser(email);
   res.json({ free: u.free, paid: u.paid });
 });
 
-// Recharge factice (bouton “Ajouter des tokens”)
 app.post("/api/topup", (req, res) => {
   const { email } = req.body || {};
   const u = getUser(email || "");
-  const ADD = Number(process.env.TOPUP_AMOUNT || 1000); // par défaut +1000
-  u.free += ADD;
-  res.json({ ok: true, free: u.free, paid: u.paid, added: ADD });
+  u.free += TOPUP_AMOUNT;
+  res.json({ ok: true, free: u.free, paid: u.paid, added: TOPUP_AMOUNT });
 });
 
-// Chat IA
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, email, first } = req.body || {};
-    if (!message || typeof message !== "string") {
-      return res.status(400).json({ error: "Message requis" });
+    const { message, email, first, images } = req.body || {};
+    if ((!message || !message.trim()) && (!images || !images.length)) {
+      return res.status(400).json({ error: "Message ou image requis" });
     }
 
     const u = getUser(email || "");
 
-    // Prompt système (style D + présentation si first)
+    // Prompt système (style D + prudence sur l'actualité)
     const systemPrompt =
 `Tu es Philomène IA, assistant personnel polyvalent.
-Style: clair, chaleureux, fiable, sans blabla inutile.
-Langue: réponds dans la langue du message utilisateur (FR/EN/NL).
-Donne des explications concrètes, des étapes si utile, et propose une action suivante quand pertinent.`;
+Style: clair, chaleureux, fiable, concret. Réponds dans la langue de l'utilisateur (FR/EN/NL).
+Si la question touche à des sujets évolutifs (actualité, politique, sport, météo, prix),
+répond au présent avec prudence ("d'après mes dernières infos disponibles, ... cela peut avoir évolué récemment")
+et propose de vérifier si besoin. Donne des étapes/actionnables quand utile.`;
 
-    const firstGreeting =
-`Bonjour 👋 Je suis **Philomène IA**, ton assistant perso.
-Je peux t’aider pour tout: idées, rédaction, explications, dépannage, recettes…
-Dis-moi ce qu’il te faut !`;
-
-    const messages = [{ role: "system", content: systemPrompt }];
+    // Intro à la 1re interaction
+    let userText = message || "";
     if (first && u.greeted !== true) {
-      messages.push({ role: "assistant", content: firstGreeting });
+      userText =
+        "Bonjour 👋 Je suis **Philomène IA**, ton assistant perso. " +
+        "Je peux t’aider pour tout: idées, rédaction, explications, dépannage, recettes… " +
+        "Dis-moi ce qu’il te faut !\n\n" +
+        (message || "");
       u.greeted = true;
     }
-    messages.push({ role: "user", content: message });
 
-    // Appel OpenAI
-    const { reply, tokensUsed } = await callOpenAI(messages);
+    // Appel OpenAI (vision si images[])
+    const { reply, tokensUsed } = await callOpenAI({
+      systemPrompt,
+      userText,
+      images: Array.isArray(images) ? images : []
+    });
 
-    // Décrémentation d'après l'usage réel (tokensUsed)
+    // Décrémentation d’après usage réel
     if (totalBalance(u) < tokensUsed) {
-      // Pas assez → on ne consomme rien, on avertit
       return res.status(402).json({
         error: "Crédits insuffisants",
         needed: tokensUsed,
@@ -181,7 +200,7 @@ Dis-moi ce qu’il te faut !`;
 // 404
 app.use((_req, res) => res.status(404).json({ error: "Route non trouvée" }));
 
-// Launch
+// Lancement
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("✅ Backend Philomène IA en ligne sur port", PORT);
