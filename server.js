@@ -1,106 +1,182 @@
-<!doctype html>
-<html lang="fr">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Philomène IA Messenger – GPT</title>
-  <script async crossorigin="anonymous"
-    data-clerk-publishable-key="pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-    src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js">
-  </script>
-  <style>
-    :root{--bg:#0c1a24;--fg:#eaf2f7;--muted:#9bb3c2;--btn:#3b82f6;--card:#0f2430}
-    *{box-sizing:border-box} body{
-      margin:0;background:var(--bg);color:var(--fg);font-family:system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial, sans-serif;
-      min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px
-    }
-    .wrap{width:100%;max-width:780px}
-    .card{background:rgba(15,36,48,.9);backdrop-filter: blur(6px);border:1px solid rgba(255,255,255,.06);
-      border-radius:16px;padding:28px 24px;box-shadow:0 8px 30px rgba(0,0,0,.35)}
-    h1{margin:0 0 8px;font-size: clamp(28px, 5.5vw, 42px)}
-    p{margin:0 0 18px;color:var(--muted)}
-    .row{display:flex;gap:12px;flex-wrap:wrap;margin:10px 0 20px}
-    button{appearance:none;border:none;background:var(--btn);color:#fff;padding:12px 16px;border-radius:10px;font-weight:600;cursor:pointer}
-    .ghost{background:#2b2b2b}
-    .pill{display:inline-block;margin-top:8px;color:#cde;opacity:.9}
-    .badge{display:inline-flex;gap:8px;align-items:center;font-weight:700}
-    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace}
-    #balance{font-weight:800}
-    .warn{color:#ffcf6c}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <h1>Philomène IA Messenger – GPT ✨</h1>
-      <p>Assistant personnel tout-en-un. À l’inscription, vous recevez <span class="badge">🎁 <span id="gift">5000</span> tokens</span>.</p>
+/* =========================================
+   Philomène IA – Backend minimal propre
+   ========================================= */
 
-      <div class="row" id="authRow">
-        <button id="btnSignUp">Créer un compte</button>
-        <button class="ghost" id="btnSignIn">Se connecter</button>
-        <span class="pill mono" id="who"></span>
-      </div>
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
 
-      <p class="mono">Solde: <span id="balance">0</span> (gratuit) • <span id="paid">0</span> (payant)</p>
-      <p id="status" class="warn mono"></p>
-    </div>
-  </div>
+dotenv.config();
 
-  <script>
-    const API_BASE = "https://api.philomeneia.com"; // ← ton backend Render
-    const giftEl = document.getElementById("gift");
-    const whoEl = document.getElementById("who");
-    const balEl = document.getElementById("balance");
-    const paidEl = document.getElementById("paid");
-    const statusEl = document.getElementById("status");
+/* ---------- Config ---------- */
+const PORT = process.env.PORT || 10000;
 
-    async function call(method, path, body) {
-      const res = await fetch(API_BASE + path, {
-        method,
-        headers: { "Content-Type": "application/json" },
-        body: body ? JSON.stringify(body) : undefined,
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error(`${res.status}`);
-      return res.json();
-    }
+// Origines autorisées, séparées par des virgules dans ALLOW_ORIGINS
+// ex: https://philomeneia.com,https://www.philomeneia.com,https://philo-ne-ia-site.onrender.com
+const allowedOrigins = (process.env.ALLOW_ORIGINS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
 
-    function showStatus(msg){ statusEl.textContent = msg || "" }
+const FREE_AFTER_SIGNUP = Number(process.env.FREE_AFTER_SIGNUP || 5000);
+const FREE_ANON = Number(process.env.FREE_ANON || 1000);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-    // Clerk
-    window.addEventListener("load", async () => {
-      await window.Clerk.load();
+if (!OPENAI_API_KEY) {
+  console.warn("⚠️  OPENAI_API_KEY manquant. Les appels IA échoueront.");
+}
 
-      const btnUp = document.getElementById("btnSignUp");
-      const btnIn = document.getElementById("btnSignIn");
+/* ---------- App & middlewares ---------- */
+const app = express();
 
-      btnUp.onclick = () => window.Clerk.openSignUp();
-      btnIn.onclick = () => window.Clerk.openSignIn();
+app.use(express.json({ limit: "5mb" }));
 
-      // Quand la session change, on crédite et on affiche le solde
-      window.Clerk.addListener(async ({ session }) => {
-        try{
-          if(!session){ whoEl.textContent = ""; balEl.textContent="0"; paidEl.textContent="0"; return; }
-          const user = await window.Clerk.user;
-          const email = user?.primaryEmailAddress?.emailAddress || user?.emailAddresses?.[0]?.emailAddress;
-          if(!email){ showStatus("Pas d’email trouvé."); return; }
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true); // autorise cURL, Postman, etc.
+      if (allowedOrigins.length === 0) return cb(null, true);
+      const ok = allowedOrigins.includes(origin);
+      cb(ok ? null : new Error("Origin not allowed by CORS"), ok);
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
-          whoEl.textContent = email;
+/* ---------- Stockage ultra-simple en mémoire ----------
+   Suffisant pour le test. En prod, brancher une vraie base (Redis/SQL).
+-------------------------------------------------------- */
+const users = new Map(); // email -> { email, free, paid, createdAt }
 
-          // 1) init (crédite 5000 si nouveau)
-          await call("POST","/init",{ email });
-
-          // 2) récupère le solde
-          const b = await call("GET", `/balance?email=${encodeURIComponent(email)}`);
-          balEl.textContent = b.free ?? 0;
-          paidEl.textContent = b.paid ?? 0;
-          giftEl.textContent = "5000";
-          showStatus("");
-        }catch(e){
-          showStatus("Erreur API (HTTP "+e.message+"). Vérifie le backend.");
-        }
-      });
+/* ---------- Helpers ---------- */
+function getOrCreateUser(email, initialFree = 0) {
+  const key = email.toLowerCase();
+  if (!users.has(key)) {
+    users.set(key, {
+      email: key,
+      free: Math.max(0, initialFree),
+      paid: 0,
+      createdAt: new Date().toISOString(),
     });
-  </script>
-</body>
-</html>
+  }
+  return users.get(key);
+}
+
+function getBalance(email) {
+  const u = users.get(email.toLowerCase());
+  return u ? { free: u.free, paid: u.paid, total: u.free + u.paid } : { free: 0, paid: 0, total: 0 };
+}
+
+function chargeOneToken(email) {
+  const u = users.get(email.toLowerCase());
+  if (!u) return false;
+  if (u.free > 0) {
+    u.free -= 1;
+    return true;
+  }
+  if (u.paid > 0) {
+    u.paid -= 1;
+    return true;
+  }
+  return false;
+}
+
+/* ---------- Routes ---------- */
+
+// Santé
+app.get("/health", (_req, res) => res.json({ ok: true, service: "philo-backend", time: new Date().toISOString() }));
+
+// Inscription ➜ attribue FREE_AFTER_SIGNUP tokens si nouveau
+app.post("/api/signup", (req, res) => {
+  const { email } = req.body || {};
+  if (!email || !/\S+@\S+\.\S+/.test(email)) {
+    return res.status(400).json({ error: "Email invalide." });
+  }
+  const user = getOrCreateUser(email, FREE_AFTER_SIGNUP);
+  return res.json({ ok: true, tokens: getBalance(user.email) });
+});
+
+// Compte anonyme (si tu veux un bouton « Essayer sans compte »)
+app.post("/api/anon", (_req, res) => {
+  // identifiant pseudo-email pour la session invitée
+  const email = `anon-${Date.now()}@local`;
+  const user = getOrCreateUser(email, FREE_ANON);
+  return res.json({ ok: true, email: user.email, tokens: getBalance(user.email) });
+});
+
+// Infos utilisateur (affichage « Connecté: » + solde)
+app.get("/api/me", (req, res) => {
+  const email = req.query.email;
+  if (!email) return res.status(400).json({ error: "Paramètre 'email' requis." });
+  const tokens = getBalance(email);
+  return res.json({ ok: true, email: email.toLowerCase(), tokens });
+});
+
+// Solde direct
+app.get("/api/tokens", (req, res) => {
+  const email = req.query.email;
+  if (!email) return res.status(400).json({ error: "Paramètre 'email' requis." });
+  return res.json({ ok: true, tokens: getBalance(email) });
+});
+
+// Conversation IA (décrémente 1 token par requête)
+app.post("/api/message", async (req, res) => {
+  const { email, message, lang } = req.body || {};
+  if (!email) return res.status(400).json({ error: "Email requis." });
+  if (!message || typeof message !== "string") {
+    return res.status(400).json({ error: "Message requis." });
+  }
+
+  const exists = users.has(email.toLowerCase());
+  if (!exists) getOrCreateUser(email, 0); // si pas inscrit, pas de free auto
+  if (!chargeOneToken(email)) {
+    return res.status(402).json({ error: "Plus de tokens." });
+  }
+
+  let reply = "(Réponse IA indisponible)";
+  try {
+    if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY manquant");
+
+    // Prompt très simple. Tu pourras le spécialiser plus tard.
+    const sys = `Tu es "Philomène IA", un assistant personnel bienveillant.
+Réponds en ${lang || "fr"}. Fais court, utile et clair.`;
+
+    const body = {
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: message },
+      ],
+      temperature: 0.4,
+    };
+
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!r.ok) {
+      const txt = await r.text().catch(() => "");
+      throw new Error(`OpenAI ${r.status}: ${txt}`);
+    }
+
+    const data = await r.json();
+    reply = data?.choices?.[0]?.message?.content?.trim() || reply;
+  } catch (e) {
+    console.error("OpenAI error:", e.message);
+    reply = "Désolé, le service IA a eu un souci temporaire. Réessaie dans un instant.";
+  }
+
+  return res.json({ ok: true, reply, tokens: getBalance(email) });
+});
+
+/* ---------- Start ---------- */
+app.listen(PORT, () => {
+  console.log(`✅ Backend Philomène IA démarré sur port ${PORT}`);
+});
