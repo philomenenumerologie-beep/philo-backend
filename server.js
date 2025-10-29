@@ -1,208 +1,164 @@
+// server.js — mémoire de conversation en RAM (simple et efficace)
 import express from "express";
 import cors from "cors";
-import multer from "multer";
-import fetch from "node-fetch";
 import dotenv from "dotenv";
-import OpenAI from "openai";
-
+import fetch from "node-fetch";
 dotenv.config();
 
-const {
-  OPENAI_API_KEY,
-  ALLOW_ORIGINS = "",
-  PORT = 10000,
-  FREE_AFTER_SIGNUP = "5000",
-  FREE_ANON = "1000",
-} = process.env;
-
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "10mb" }));
 
-// CORS dynamique
-const allowedOrigins = ALLOW_ORIGINS.split(",").map(s => s.trim()).filter(Boolean);
+// CORS autorisés (mets tes domaines)
+const allowed = (process.env.ALLOW_ORIGINS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
 app.use(
   cors({
-    origin: function (origin, cb) {
+    origin(origin, cb) {
       if (!origin) return cb(null, true);
-      if (allowedOrigins.includes(origin)) return cb(null, true);
-      console.log("❌ CORS blocked:", origin);
-      return cb(new Error("Not allowed by CORS"));
+      if (allowed.includes(origin)) return cb(null, true);
+      console.log("❌ CORS:", origin);
+      cb(new Error("Not allowed by CORS"));
     },
   })
 );
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } }); // 8MB
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const PORT = process.env.PORT || 10000;
 
-// OpenAI client
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+// ———————————————————————————————
+// MÉMOIRE EN RAM (par utilisateur)
+// ———————————————————————————————
+/*
+  sessions: Map<userId, {
+    summary: string | null,    // pour plus tard (résumé long)
+    turns: Array<{role:"user"|"assistant", content:string}> // derniers échanges
+  }>
+*/
+const sessions = new Map();
+const MAX_TURNS = 12; // on garde les 12 derniers messages (6 allers-retours)
 
-// Helpers
-const ok = (res, data) => res.json(data);
-const fail = (res, e, code = 500) => {
-  console.error(e?.stack || e);
-  res.status(code).json({ error: e?.message || "Server error" });
-};
-
-// —————————————————— Mini “browsing” très simple ——————————————————
-// On utilise un fetch en lecture publique (r.jina.ai) pour récupérer un texte récent
-// et on l’injecte comme "contexte web" au modèle.
-async function webContextFrom(url) {
-  const u = `https://r.jina.ai/http://` + url.replace(/^https?:\/\//, "");
-  const r = await fetch(u, { timeout: 10_000 });
-  if (!r.ok) throw new Error(`Web fetch failed: ${r.status}`);
-  return await r.text();
+/** Récupère ou crée la session d’un user */
+function getSession(userId) {
+  if (!sessions.has(userId)) {
+    sessions.set(userId, { summary: null, turns: [] });
+  }
+  return sessions.get(userId);
 }
 
-async function smartNewsContext(userMsg) {
-  // Quelques URLs génériques utiles quand on pose des questions d’actualité FR
-  // Tu peux élargir la liste si tu veux
-  const candidates = [
-    "en.wikipedia.org/wiki/Prime_Minister_of_France",
-    "en.wikipedia.org/wiki/Government_of_France",
-    "news.google.com/rss/search?q=site:gov.fr",
-  ];
-
-  // Si on détecte des mots-clés, on priorise une page
-  const m = userMsg.toLowerCase();
-  if (m.includes("premier ministre") || m.includes("première ministre")) {
-    candidates.unshift("en.wikipedia.org/wiki/Prime_Minister_of_France");
+/** Ajoute un tour et coupe si trop long */
+function pushTurn(userId, role, content) {
+  const s = getSession(userId);
+  s.turns.push({ role, content });
+  // on limite la longueur
+  if (s.turns.length > MAX_TURNS) {
+    s.turns.splice(0, s.turns.length - MAX_TURNS);
   }
-
-  // On essaie 1 ou 2 sources max pour rester léger
-  const take = candidates.slice(0, 2);
-  const texts = [];
-  for (const url of take) {
-    try {
-      const t = await webContextFrom(url);
-      texts.push(`SOURCE: ${url}\n${t.slice(0, 12000)}`); // limite pour ne pas exploser le contexte
-    } catch (e) {
-      console.warn("web fetch fail:", url, e.message);
-    }
-  }
-  if (!texts.length) return null;
-  return texts.join("\n\n––––––––––––––––––––––––––––––––\n\n");
 }
 
-// —————————————————— Routes ——————————————————
+/** Construit le contexte envoyé au modèle */
+function buildMessages(userId, userText, imageDataUrl) {
+  const s = getSession(userId);
+  const system = {
+    role: "system",
+    content:
+      "Tu es Philomène IA. Réponds clairement, au présent quand c’est du contexte général, " +
+      "et fais le lien avec le passé si c’est utile. Si tu n'es pas sûr pour l’actualité, " +
+      "dis-le et propose de vérifier. Langue par défaut: français. Date: " +
+      new Date().toLocaleString("fr-FR", { timeZone: "Europe/Paris" }),
+  };
 
-app.get("/", (req, res) => res.send("✅ Philomenia API en ligne"));
+  const msgs = [system];
 
-app.get("/api/balance", (req, res) => {
-  // maquette simple (à connecter à ta DB plus tard)
-  ok(res, { free: Number(FREE_AFTER_SIGNUP), paid: 0 });
+  if (s.summary) {
+    msgs.push({
+      role: "system",
+      content: "Mémoire condensée de la conversation: " + s.summary,
+    });
+  }
+
+  // on insère l’historique court
+  for (const t of s.turns) {
+    msgs.push({ role: t.role, content: t.content });
+  }
+
+  // on ajoute le message en cours (texte + éventuellement image)
+  if (imageDataUrl) {
+    msgs.push({
+      role: "user",
+      content: [
+        { type: "text", text: userText || "Analyse cette image." },
+        { type: "image_url", image_url: { url: imageDataUrl } },
+      ],
+    });
+  } else {
+    msgs.push({ role: "user", content: userText });
+  }
+
+  return msgs;
+}
+
+// ———————————————————————————————
+// ROUTES
+// ———————————————————————————————
+app.get("/", (_, res) => res.send("✅ Philomène API en ligne (mémoire RAM)"));
+
+app.get("/api/balance", (_, res) => res.json({ free: 5000, paid: 0 }));
+
+// Effacer la mémoire d’un user (debug facultatif)
+app.post("/api/clear", (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: "userId requis" });
+  sessions.delete(userId);
+  res.json({ ok: true });
 });
 
-// Chat texte, avec “actu” auto si on détecte une question potentiellement fraîche
+// Chat principal (texte + image, avec mémoire)
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, email, force_browse = false } = req.body || {};
-    if (!message || typeof message !== "string") {
-      return fail(res, new Error("Paramètre 'message' manquant"), 400);
+    const { userId, message, imageDataUrl } = req.body || {};
+    if (!userId) return res.status(400).json({ error: "userId requis" });
+    if (!message && !imageDataUrl) return res.status(400).json({ error: "message ou image requis" });
+
+    // Si pas de clé, on simule juste la mémoire pour test
+    if (!OPENAI_API_KEY) {
+      pushTurn(userId, "user", message || "(photo)");
+      const fake = "Mode test: pas de clé OpenAI configurée.";
+      pushTurn(userId, "assistant", fake);
+      return res.json({ reply: fake, charged: false, mode: imageDataUrl ? "vision" : "chat" });
     }
 
-    // Détecter si le user demande de l’actu
-    const msg = message.trim();
-    const askFresh =
-      force_browse ||
-      /\b(aujourd'hui|actuel|actuellement|en ce moment|202\d|202[45]|qui est|derni(ères|er)|news|actualité)\b/i.test(
-        msg
-      );
+    // construit contexte selon l’historique
+    const messages = buildMessages(userId, message || "", imageDataUrl);
 
-    let webContext = null;
-    if (askFresh) {
-      try {
-        webContext = await smartNewsContext(msg);
-      } catch (e) {
-        console.warn("news context failed:", e.message);
-      }
-    }
-
-    const system = [
-      {
-        role: "system",
-        content:
-          "Tu es Philomène, assistante personnelle. Donne des réponses utiles, claires et fiables." +
-          " Date actuelle: " +
-          new Date().toLocaleString("fr-FR", { timeZone: "Europe/Paris" }) +
-          ". Si la question semble liée à l'actualité, utilise le contexte web fourni si présent. " +
-          "Quand tu n'es pas certain, annonce l'incertitude plutôt que d'inventer. " +
-          "Écris en français par défaut. Reste concise.",
-      },
-    ];
-
-    const userParts = [{ type: "text", text: msg }];
-
-    const messages = [
-      ...system,
-      ...(webContext
-        ? [
-            {
-              role: "system",
-              content:
-                "CONTEXTE_WEB (résumé brut non vérifié, ne cite pas textuellement si tu n'es pas sûr):\n" +
-                webContext,
-            },
-          ]
-        : []),
-      { role: "user", content: userParts },
-    ];
-
-    const resp = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages,
-      temperature: 0.3,
+    // appel modèle
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o-mini", // texte + vision
+        messages,
+        temperature: 0.4,
+      }),
     });
 
-    const reply = resp.choices?.[0]?.message?.content?.toString().trim() || "Réponse reçue.";
-    ok(res, { reply });
+    const j = await r.json();
+    const reply = j?.choices?.[0]?.message?.content || "Désolé, pas de réponse.";
+
+    // on stocke tour user + tour assistant
+    pushTurn(userId, "user", message || "(photo)");
+    pushTurn(userId, "assistant", reply);
+
+    res.json({ reply, charged: true, mode: imageDataUrl ? "vision" : "chat" });
   } catch (e) {
-    fail(res, e);
+    console.error(e);
+    res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
-// Analyse d’image (A+B+C+D+E): /api/photo (multipart form-data: field "photo")
-app.post("/api/photo", upload.single("photo"), async (req, res) => {
-  try {
-    if (!req.file) return fail(res, new Error("Aucun fichier reçu (champ 'photo')"), 400);
-
-    const mime = req.file.mimetype || "image/jpeg";
-    const base64 = req.file.buffer.toString("base64");
-    const dataUrl = `data:${mime};base64,${base64}`;
-
-    const instruction =
-      (req.body?.instruction ||
-        "Analyse cette image. 1) Décris la scène/objets. 2) Si c'est une panne/erreur, donne un diagnostic." +
-          " 3) Si du texte est présent, fais l'OCR. 4) Termine par des conseils actionnables.") + "";
-
-    const messages = [
-      {
-        role: "system",
-        content:
-          "Tu es Philomène vision. Donne une analyse fiable, précise et pratique. Structure en points courts.",
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: instruction },
-          { type: "image_url", image_url: { url: dataUrl } },
-        ],
-      },
-    ];
-
-    const resp = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages,
-      temperature: 0.2,
-    });
-
-    const reply = resp.choices?.[0]?.message?.content?.toString().trim() || "Analyse terminée.";
-    ok(res, { reply });
-  } catch (e) {
-    fail(res, e);
-  }
-});
-
-// —————————————————— Lancement ——————————————————
+// Lancement
 app.listen(PORT, () => {
-  console.log(`✅ Philomenia API running on port ${PORT}`);
+  console.log("✅ API avec mémoire sur port", PORT);
 });
