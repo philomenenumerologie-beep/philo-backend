@@ -1,161 +1,123 @@
-/* ===============================
-   Philomenia – Backend complet
-   =============================== */
+/* =========================================
+   Philomène IA – Backend (Express + Clerk)
+   ========================================= */
 
 import express from "express";
-import fetch from "node-fetch";
 import cors from "cors";
-import path from "path";
-import { fileURLToPath } from "url";
-
+import fetch from "node-fetch";
 import jwt from "jsonwebtoken";
-import { Resend } from "resend";
-import { Webhook } from "svix"; // vérification Clerk Webhooks
+import { Webhook } from "svix";           // vérification Clerk webhooks
 
-// ---------- Utils de chemin
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// ---------- App
+// ===== App
 const app = express();
+app.use(express.json());
 
-// ---------- CORS sécurisé
-const allowedOrigins = (() => {
-  try {
-    return JSON.parse(process.env.ALLOWED_ORIGINS || "[]");
-  } catch {
-    return [];
-  }
-})();
+// ===== CORS (modifie si besoin)
+const allowedOrigins = JSON.parse(process.env.ALLOWED_ORIGINS || '["https://philomeneia.com"]');
 app.use(
   cors({
-    origin: (origin, cb) => {
-      // autorise requêtes server-to-server / local sans origin
-      if (!origin) return cb(null, true);
-      if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error("Origin not allowed by CORS"));
-    },
+    origin: allowedOrigins,
     credentials: true,
   })
 );
 
-// Le JSON parser global (⚠️ le webhook aura son propre parser raw)
-app.use(express.json());
+// ====== Mini “base de données” en mémoire (OK pour démarrer)
+const users = new Map(); // key = clerkUserId, value = { free: number, paid: number }
 
-// ---------- Resend (optionnel)
-const resend = new Resend(process.env.RESEND_API_KEY);
+// ===== Page ping
+app.get("/", (_req, res) => res.send("API Philomène IA • OK"));
 
-// =====================
-// Routes de test / util
-// =====================
+// ===== Balance pour l'utilisateur courant
+// Front te passera l'ID Clerk via Authorization: Bearer <token JWT signé côté serveur>,
+// mais pour faire simple on accepte ?uid=<clerkUserId> pendant la mise en place.
+app.get("/api/balance", (req, res) => {
+  const uid = req.query.uid;
+  if (!uid) return res.status(400).json({ error: "uid manquant" });
 
-app.get("/", (_req, res) => {
-  res.send("API Philomenia OK");
-});
-
-app.get("/balance", (_req, res) => {
+  const row = users.get(uid) || { free: 0, paid: 0 };
   res.json({
-    free: Number(process.env.FREE_ANON_CREDITS || 5000),
-    paid: Number(process.env.PAID_CREDITS || 0),
+    free: Number(row.free || 0),
+    paid: Number(row.paid || 0),
+    total: Number((row.free || 0) + (row.paid || 0)),
   });
 });
 
-// ===================================
-// Webhook Clerk : créditer 5000 tokens
-// ===================================
-// Important : route AVANT app.listen ; parser RAW uniquement pour CE endpoint
-app.post(
-  "/webhooks/clerk",
-  express.raw({ type: "*/*" }),
-  async (req, res) => {
-    try {
-      const signingSecret = process.env.CLERK_WEBHOOK_SECRET;
-      if (!signingSecret) {
-        console.error("❌ CLERK_WEBHOOK_SECRET manquant");
-        return res.status(500).send("Server misconfigured");
-      }
-
-      // Vérifie la signature Svix (format Clerk)
-      const wh = new Webhook(signingSecret);
-
-      // req.body est un Buffer à cause de express.raw
-      const evt = wh.verify(req.body, req.headers);
-
-      const { type, data } = evt;
-
-      // On réagit créa d’utilisateur
-      if (type === "user.created") {
-        const userId = data?.id;
-        const email =
-          data?.email_addresses?.[0]?.email_address ??
-          data?.primary_email_address_id ??
-          "unknown";
-
-        // TODO: ici, mets à jour ta base (ou KV, ou Supabase) :
-        // addCredits(userId, 5000)
-
-        console.log("🎉 user.created", { userId, email });
-        console.log("🎁 5000 tokens ajoutés (à implémenter côté stockage)");
-      }
-
-      res.status(200).send("OK");
-    } catch (err) {
-      console.error("❌ Erreur webhook Clerk:", err?.message || err);
-      res.status(400).send("Bad webhook");
-    }
-  }
-);
-
-// ===================================
-// Chat OpenAI – simple proxy backend
-// ===================================
+// ===== Consommer des tokens (exemple pour /api/chat)
 app.post("/api/chat", async (req, res) => {
+  const { uid, message } = req.body || {};
+  if (!uid || !message) return res.status(400).json({ error: "uid et message requis" });
+
+  const row = users.get(uid) || { free: 0, paid: 0 };
+  const available = (row.free || 0) + (row.paid || 0);
+  if (available <= 0) return res.status(402).json({ error: "Plus de tokens" });
+
+  // Décompte 1 token par message (à ajuster selon ton modèle/coût)
+  if (row.free > 0) row.free -= 1;
+  else row.paid -= 1;
+  users.set(uid, row);
+
   try {
-    const { message } = req.body || {};
-    if (!message) return res.status(400).json({ error: "Message manquant" });
-
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "OPENAI_API_KEY manquant" });
-
-    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: "Tu es l’assistant de Philomenia." },
-          { role: "user", content: message },
-        ],
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        messages: [{ role: "user", content: message }],
       }),
     });
-
-    if (!response.ok) {
-      const text = await response.text();
-      console.error("OpenAI error:", text);
-      return res.status(500).json({ error: "OpenAI request failed" });
-    }
-
-    const data = await response.json();
-    const reply =
-      data?.choices?.[0]?.message?.content?.trim?.() ||
-      "(pas de réponse)";
-
-    res.json({ reply });
+    const data = await r.json();
+    res.json({ reply: data?.choices?.[0]?.message?.content || "(pas de réponse)" });
   } catch (err) {
-    console.error("❌ /api/chat error:", err?.message || err);
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Erreur OpenAI" });
   }
 });
 
-// ===================================
-// Lancement
-// ===================================
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log(`✅ Backend Philomenia prêt sur port ${PORT}`);
+// ===== Webhook Clerk : donne 5000 tokens à la création d'utilisateur
+app.post("/webhooks/clerk", async (req, res) => {
+  const whSecret = process.env.CLERK_WEBHOOK_SECRET;
+  if (!whSecret) return res.status(500).send("CLERK_WEBHOOK_SECRET manquant");
+
+  const svix_id = req.headers["svix-id"];
+  const svix_timestamp = req.headers["svix-timestamp"];
+  const svix_signature = req.headers["svix-signature"];
+  if (!svix_id || !svix_timestamp || !svix_signature) {
+    return res.status(400).send("Headers Svix manquants");
+  }
+
+  const payload = req.body;
+  const body = JSON.stringify(payload);
+
+  try {
+    const wh = new Webhook(whSecret);
+    const evt = wh.verify(body, {
+      "svix-id": svix_id,
+      "svix-timestamp": svix_timestamp,
+      "svix-signature": svix_signature,
+    });
+
+    // On s'intéresse à user.created
+    if (evt.type === "user.created") {
+      const uid = evt.data.id; // Clerk user id
+      const startCredits = Number(process.env.FREE_ANON_CREDITS || 5000);
+
+      // Si déjà présent, ne pas redonner
+      const current = users.get(uid);
+      if (!current) {
+        users.set(uid, { free: startCredits, paid: 0 });
+        console.log("🎁 Crédit de bienvenue attribué:", uid, startCredits);
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("⚠️ Webhook verify error:", err);
+    res.status(400).send("Signature invalide");
+  }
 });
+
+// ===== Lancement serveur
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log("✅ Backend Philomène IA sur", PORT));
