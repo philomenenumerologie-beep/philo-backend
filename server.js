@@ -1,38 +1,30 @@
 // server.js — Philomène IA (backend complet)
-// Fonctions : CORS robuste • Solde tokens (mémoire) • Chat texte+photo (vision) • Recharge factice
+// CORS robuste • Solde tokens • Chat texte+photo (vision) • Offres tokens (simu PayPal)
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import fetch from "node-fetch"; // utile si Node < 22
+import fetch from "node-fetch";
 dotenv.config();
 
 const app = express();
-app.use(express.json({ limit: "25mb" })); // pour images base64
+app.use(express.json({ limit: "25mb" }));
 
-// ===== CORS robuste (gère www., espaces, retours à la ligne) =====
+// ===== CORS
 const rawAllow = process.env.ALLOW_ORIGINS || "";
 const allowedHosts = rawAllow
   .split(",")
   .map(s => s.trim())
   .filter(Boolean)
-  .map(u => {
-    try { return new URL(u).hostname.toLowerCase(); }
-    catch { return null; }
-  })
+  .map(u => { try { return new URL(u).hostname.toLowerCase(); } catch { return null; } })
   .filter(Boolean);
-
 const stripWww = h => h.replace(/^www\./, "");
-const hostFromOrigin = o => {
-  try { return new URL(o).hostname.toLowerCase(); }
-  catch { return ""; }
-};
+const hostFromOrigin = o => { try { return new URL(o).hostname.toLowerCase(); } catch { return ""; } };
 
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true); // tests serveur→serveur
+    if (!origin) return cb(null, true);
     const h = hostFromOrigin(origin);
-    const ok = allowedHosts.includes(h) ||
-               allowedHosts.map(stripWww).includes(stripWww(h));
+    const ok = allowedHosts.includes(h) || allowedHosts.map(stripWww).includes(stripWww(h));
     if (ok) return cb(null, true);
     console.log("❌ CORS blocked:", origin, "allowed:", allowedHosts);
     cb(new Error("Not allowed by CORS"));
@@ -42,90 +34,66 @@ app.use(cors({
 }));
 app.options("*", cors());
 
-// ===== "Base" en mémoire (simple pour la bêta) =====
+// ===== “DB” en mémoire
 const DEFAULT_FREE = Number(process.env.FREE_AFTER_SIGNUP || 5000);
 const DEFAULT_ANON = Number(process.env.FREE_ANON || 0);
-const TOPUP_AMOUNT = Number(process.env.TOPUP_AMOUNT || 1000);
 
-// Map email -> { free, paid, greeted }
+// email -> { free, paid, greeted }
 const users = new Map();
-
-function getUser(email) {
+const getUser = (email) => {
   const key = (email || "").toLowerCase().trim();
-  if (!users.has(key)) {
-    users.set(key, { free: key ? DEFAULT_FREE : DEFAULT_ANON, paid: 0, greeted: false });
-  }
+  if (!users.has(key)) users.set(key, { free: key ? DEFAULT_FREE : DEFAULT_ANON, paid: 0, greeted: false });
   return users.get(key);
-}
-function totalBalance(u) { return (u.free || 0) + (u.paid || 0); }
-function consume(u, n) {
+};
+const total = (u) => (u.free || 0) + (u.paid || 0);
+const consume = (u, n) => {
   let rest = n;
-  // on consomme d'abord le payant (tu peux inverser si tu préfères)
   if (u.paid >= rest) { u.paid -= rest; rest = 0; }
-  else {
-    rest -= u.paid; u.paid = 0;
-    if (u.free >= rest) { u.free -= rest; rest = 0; }
-  }
+  else { rest -= u.paid; u.paid = 0; if (u.free >= rest) { u.free -= rest; rest = 0; } }
   return rest === 0;
-}
+};
 
-// ===== OpenAI =====
+// ===== OpenAI
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MODEL   = process.env.OPENAI_MODEL   || "gpt-4o-mini";
 
-// Appel OpenAI (texte seul OU texte+images via content[]).
 async function callOpenAI({ systemPrompt, userText, images = [] }) {
-  // messages → content (pour gpt-4o-mini vision)
-  const msgUserParts = [];
-  if (userText && userText.trim()) {
-    msgUserParts.push({ type: "text", text: userText.trim() });
-  }
-  for (const dataUrl of images) {
-    // dataUrl = "data:image/...;base64,AAAA"
-    msgUserParts.push({ type: "image_url", image_url: { url: dataUrl } });
-  }
+  const content = [];
+  if (userText?.trim()) content.push({ type: "text", text: userText.trim() });
+  for (const dataUrl of images) content.push({ type: "image_url", image_url: { url: dataUrl } });
 
   if (!OPENAI_API_KEY) {
-    // Mode dégradé si pas de clé
-    const fake = images.length
-      ? "J’ai bien reçu ta photo. (Mode test sans clé OpenAI)"
-      : "Réponse de test (aucune clé OpenAI configurée).";
+    const fake = images.length ? "J’ai bien reçu ta photo. (Mode test sans clé OpenAI)"
+                               : "Réponse de test (pas de clé OpenAI configurée).";
     return { reply: fake, tokensUsed: 50 };
   }
 
-  const body = {
-    model: OPENAI_MODEL,
-    temperature: 0.4,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: msgUserParts.length ? msgUserParts : [{ type: "text", text: userText || "" }] }
-    ]
-  };
-
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
+    headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0.4,
+      messages: [
+        { role: "system",
+          content: systemPrompt
+        },
+        { role: "user",
+          content: content.length ? content : [{ type: "text", text: userText || "" }]
+        }
+      ]
+    })
   });
-
-  if (!r.ok) {
-    const txt = await r.text();
-    console.error("OpenAI error:", txt);
-    throw new Error("Erreur OpenAI");
-  }
-
+  if (!r.ok) throw new Error(await r.text());
   const data = await r.json();
   const reply = data?.choices?.[0]?.message?.content?.trim() || "Je n’ai rien reçu, réessaie.";
   const used = data?.usage?.total_tokens ??
                ((data?.usage?.prompt_tokens || 0) + (data?.usage?.completion_tokens || 0)) ||
-               120; // fallback
+               120;
   return { reply, tokensUsed: used };
 }
 
-// ===== Routes =====
+// ===== Routes
 app.get("/", (_req, res) => res.send("✅ API en ligne"));
 
 app.get("/api/balance", (req, res) => {
@@ -134,11 +102,24 @@ app.get("/api/balance", (req, res) => {
   res.json({ free: u.free, paid: u.paid });
 });
 
+// Recharge “offre” (simu PayPal) : ajoute des tokens payants
+// body: { email, amount }  amount > 0
+app.post("/api/topup_custom", (req, res) => {
+  const { email, amount } = req.body || {};
+  const amt = Number(amount || 0);
+  if (!email || !amt || amt <= 0) return res.status(400).json({ error: "Paramètres invalides" });
+  const u = getUser(email);
+  u.paid += amt;
+  return res.json({ ok: true, free: u.free, paid: u.paid, added: amt });
+});
+
+// Petit topup “bonus”
 app.post("/api/topup", (req, res) => {
   const { email } = req.body || {};
   const u = getUser(email || "");
-  u.free += TOPUP_AMOUNT;
-  res.json({ ok: true, free: u.free, paid: u.paid, added: TOPUP_AMOUNT });
+  const bonus = Number(process.env.TOPUP_AMOUNT || 1000);
+  u.free += bonus;
+  res.json({ ok: true, free: u.free, paid: u.paid, added: bonus });
 });
 
 app.post("/api/chat", async (req, res) => {
@@ -147,60 +128,45 @@ app.post("/api/chat", async (req, res) => {
     if ((!message || !message.trim()) && (!images || !images.length)) {
       return res.status(400).json({ error: "Message ou image requis" });
     }
-
     const u = getUser(email || "");
 
-    // Prompt système (style D + prudence sur l'actualité)
-    const systemPrompt =
-`Tu es Philomène IA, assistant personnel polyvalent.
-Style: clair, chaleureux, fiable, concret. Réponds dans la langue de l'utilisateur (FR/EN/NL).
-Si la question touche à des sujets évolutifs (actualité, politique, sport, météo, prix),
-répond au présent avec prudence ("d'après mes dernières infos disponibles, ... cela peut avoir évolué récemment")
-et propose de vérifier si besoin. Donne des étapes/actionnables quand utile.`;
+    // Style présent + prudence actu
+    const systemPrompt = `
+Tu es Philomène IA, assistant personnel polyvalent, clair et chaleureux. Langue de l’utilisateur.
+Parle **au présent**. Quand l’information est sujette à changement (actualité, sport, gouvernement, prix, météo),
+formule au présent **avec prudence** et transparence: 
+- "À ma dernière mise à jour de connaissances, c’était … ; cela peut avoir changé récemment."
+- Propose si utile de vérifier sur une source récente.
+Donne des réponses concrètes et actionnables.`;
 
-    // Intro à la 1re interaction
     let userText = message || "";
     if (first && u.greeted !== true) {
-      userText =
-        "Bonjour 👋 Je suis **Philomène IA**, ton assistant perso. " +
-        "Je peux t’aider pour tout: idées, rédaction, explications, dépannage, recettes… " +
-        "Dis-moi ce qu’il te faut !\n\n" +
-        (message || "");
+      userText = "Bonjour 👋 Je suis Philomène IA, ton assistante perso. " +
+                 "Pose ta question ou envoie une photo, je m’occupe du reste.\n\n" +
+                 (message || "");
       u.greeted = true;
     }
 
-    // Appel OpenAI (vision si images[])
     const { reply, tokensUsed } = await callOpenAI({
       systemPrompt,
       userText,
       images: Array.isArray(images) ? images : []
     });
 
-    // Décrémentation d’après usage réel
-    if (totalBalance(u) < tokensUsed) {
-      return res.status(402).json({
-        error: "Crédits insuffisants",
-        needed: tokensUsed,
-        free: u.free, paid: u.paid
-      });
+    if (total(u) < tokensUsed) {
+      return res.status(402).json({ error: "Crédits insuffisants", needed: tokensUsed, free: u.free, paid: u.paid });
     }
     consume(u, tokensUsed);
 
-    res.json({
-      reply,
-      tokensUsed,
-      balance: { free: u.free, paid: u.paid }
-    });
+    res.json({ reply, tokensUsed, balance: { free: u.free, paid: u.paid } });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
-// 404
 app.use((_req, res) => res.status(404).json({ error: "Route non trouvée" }));
 
-// Lancement
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("✅ Backend Philomène IA en ligne sur port", PORT);
