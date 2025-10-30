@@ -1,17 +1,19 @@
-// server.js — Philomène IA backend
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
+import { Clerk } from "@clerk/clerk-sdk-node"; // ⬅ important
 dotenv.config();
 
 const app = express();
 
-// autoriser gros payloads pour les photos
+// Clerk (clé secrète côté backend)
+const clerk = new Clerk({ secretKey: process.env.CLERK_SECRET_KEY });
+
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-// CORS (domaines autorisés)
+// CORS
 const allowed = (process.env.ALLOW_ORIGINS || "")
   .split(",")
   .map(s => s.trim())
@@ -20,7 +22,7 @@ const allowed = (process.env.ALLOW_ORIGINS || "")
 app.use(
   cors({
     origin(origin, cb) {
-      if (!origin) return cb(null, true); // iPhone local preview
+      if (!origin) return cb(null, true);
       if (allowed.includes(origin)) return cb(null, true);
       cb(new Error("Not allowed by CORS: " + origin));
     },
@@ -30,34 +32,16 @@ app.use(
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// configuration des cadeaux tokens
-const GUEST_START_TOKENS = Number(process.env.GUEST_START_TOKENS || 1000);   // invité
-const USER_START_TOKENS  = Number(process.env.USER_START_TOKENS  || 5000);   // compte Clerk
+// Montant tokens
+const FREE_GUEST_TOKENS = 1000;   // invité
+const VERIFIED_TOKENS   = 5000;   // après email confirmé
 
-// mémoire côté serveur
-// balances : Map(userId -> number de tokens restants)
-// sessions : Map(userId -> { turns: [{role,content}], ... })
-const balances = new Map();
-const sessions = new Map();
+// mémoire en RAM
+const sessions = new Map();  // userId -> {turns: [...]}
+const balances = new Map();  // userId -> { tokens: number, verified: boolean }
 const MAX_TURNS = 12;
 
-// helpers mémoire
-function initBalanceIfNeeded(userId, isGuest = false) {
-  if (!balances.has(userId)) {
-    if (isGuest) {
-      balances.set(userId, GUEST_START_TOKENS);
-    } else {
-      balances.set(userId, USER_START_TOKENS);
-    }
-  }
-}
-function getBalance(userId) {
-  return balances.get(userId) || 0;
-}
-function setBalance(userId, value) {
-  balances.set(userId, value);
-}
-
+// helper: récupère ou crée session
 function getSession(userId) {
   if (!sessions.has(userId)) sessions.set(userId, { turns: [] });
   return sessions.get(userId);
@@ -70,141 +54,151 @@ function pushTurn(userId, role, content) {
   }
 }
 
-// construit l'historique + consignes système
+// helper: init solde utilisateur
+async function initUserBalance(userId, clerkToken) {
+  if (balances.has(userId)) return;
+
+  // Cas invité (pas de token Clerk envoyé)
+  if (!clerkToken) {
+    balances.set(userId, {
+      tokens: FREE_GUEST_TOKENS,
+      verified: false,
+      email: null,
+    });
+    return;
+  }
+
+  // Cas connecté avec Clerk: on regarde si le mail est vérifié
+  try {
+    // Vérifier le token Clerk envoyé par le front
+    // On récupère l'utilisateur
+    const { userId: uid } = await clerk.verifyToken(clerkToken);
+    const user = await clerk.users.getUser(uid);
+
+    // email primaire
+    const primaryEmail = user?.emailAddresses?.find(
+      e => e.id === user.primaryEmailAddressId
+    );
+
+    const isVerified = primaryEmail?.verification?.status === "verified";
+
+    balances.set(uid, {
+      tokens: isVerified ? VERIFIED_TOKENS : FREE_GUEST_TOKENS,
+      verified: !!isVerified,
+      email: primaryEmail?.emailAddress || null,
+    });
+  } catch (err) {
+    console.error("Erreur Clerk:", err);
+    // si le token est pas bon, on retombe en mode invité
+    balances.set(userId, {
+      tokens: FREE_GUEST_TOKENS,
+      verified: false,
+      email: null,
+    });
+  }
+}
+
+// helper: construit messages pour OpenAI
 function buildMessages(userId, text, imageDataUrl) {
   const s = getSession(userId);
 
-  const systemPrompt = `
-Tu es Philomène IA.
-Tu aides à tout : devoirs, mails, réparations, cuisine, idées business, support perso.
-Tu expliques étape par étape, en français par défaut sauf si l'utilisateur parle clairement une autre langue.
-Tu restes calme, simple, sans gros mots.
-Actualité / politique : tu donnes la dernière info que tu connais, tu dis clairement que ça peut avoir changé après ta dernière mise à jour. Ne pas inventer du "en ce moment" si tu n'es pas sûre.
-Si l'utilisateur envoie une image, tu décris ce que tu vois et tu aides à diagnostiquer ou expliquer.
-  `.trim();
+  const baseSystem = {
+    role: "system",
+    content:
+      "Tu es Philomène IA. Tu parles clair, simple, utile. " +
+      "Tu réponds d'abord en français sauf si l'utilisateur parle clairement une autre langue. " +
+      "Pour l'actualité/politique, tu précises si tu n'es pas sûr que c'est à jour.",
+  };
 
-  const msgs = [
-    { role: "system", content: systemPrompt },
-    ...s.turns.map(t => ({ role: t.role, content: t.content })),
-  ];
+  const history = s.turns.map(t => ({ role: t.role, content: t.content }));
 
+  let lastUserMsg;
   if (imageDataUrl) {
-    msgs.push({
+    lastUserMsg = {
       role: "user",
       content: [
         { type: "text", text: text || "Analyse cette image." },
         { type: "image_url", image_url: { url: imageDataUrl } },
       ],
-    });
+    };
   } else {
-    msgs.push({ role: "user", content: text });
+    lastUserMsg = { role: "user", content: text };
   }
 
-  return msgs;
+  return [baseSystem, ...history, lastUserMsg];
 }
 
-// ————————————————————
-// ROUTES
-// ————————————————————
-
-// simple ping
+// route santé
 app.get("/", (_, res) => {
-  res.send("✅ Philomène IA backend en ligne");
+  res.send("✅ API Philomène IA en ligne.");
 });
 
-// 1) démarrer une session INVITÉ
-// le front appelle ça quand l'app charge et que l'utilisateur n'a pas encore de compte
-app.post("/api/guest-start", (req, res) => {
-  // On génère un ID invité simple si le front n'en donne pas déjà un
-  // Sur mobile sans stockage long terme, on peut juste en faire un nouveau à chaque rafraîchissement
-  const guestId = "guest-" + Math.random().toString(36).slice(2, 8);
+// récupérer le statut (tokens restants + email + verified)
+app.get("/api/status", async (req, res) => {
+  // le front nous enverra userId local + (optionnel) le token Clerk
+  const userId = req.query.userId || "guest";
+  const clerkToken = req.query.clerkToken || null;
 
-  // on initialise son solde si pas encore fait
-  initBalanceIfNeeded(guestId, true);
+  await initUserBalance(userId, clerkToken);
 
-  res.json({
-    userId: guestId,
-    email: null,
-    tokens: getBalance(guestId),
-    mode: "guest",
-  });
-});
-
-// 2) démarrer une session UTILISATEUR VÉRIFIÉ (Clerk)
-// plus tard on l'appellera après login Clerk depuis le front
-app.post("/api/auth-start", (req, res) => {
-  const { userId, email } = req.body || {};
-  if (!userId || !email) {
-    return res.status(400).json({ error: "userId et email requis" });
-  }
-
-  // si on ne l'a jamais vu -> cadeau 5000
-  initBalanceIfNeeded(userId, false);
-
+  const info = balances.get(userId);
   res.json({
     userId,
-    email,
-    tokens: getBalance(userId),
-    mode: "user",
+    email: info.email,
+    verified: info.verified,
+    tokens: info.tokens,
   });
 });
 
-// 3) solde courant
-app.get("/api/balance", (req, res) => {
-  const userId = req.query.userId;
-  if (!userId) {
-    return res.status(400).json({ error: "userId requis" });
-  }
-  res.json({
-    free: getBalance(userId),
-    paid: 0,
-  });
-});
-
-// 4) reset conversation (debug)
+// vider conversation (bouton "Vider chat")
 app.post("/api/clear", (req, res) => {
   const { userId } = req.body || {};
   if (!userId) return res.status(400).json({ error: "userId requis" });
+
   sessions.delete(userId);
   res.json({ ok: true });
 });
 
-// 5) chat principal
+// envoyer un message / photo
 app.post("/api/chat", async (req, res) => {
   try {
-    const { userId, message, imageDataUrl } = req.body || {};
-    if (!userId) {
-      return res.status(400).json({ error: "userId requis" });
-    }
-    if (!message && !imageDataUrl) {
+    const { userId, message, imageDataUrl, clerkToken } = req.body || {};
+    if (!userId) return res.status(400).json({ error: "userId requis" });
+    if (!message && !imageDataUrl)
       return res.status(400).json({ error: "message ou image requis" });
-    }
 
-    // vérifier solde
-    const remaining = getBalance(userId);
-    if (remaining <= 0) {
+    // s'assurer qu'on a bien initialisé ce user (avec clerk ou invité)
+    await initUserBalance(userId, clerkToken);
+
+    const wallet = balances.get(userId);
+    if (!wallet) return res.status(500).json({ error: "wallet introuvable" });
+
+    // pas de tokens dispo
+    if (wallet.tokens <= 0) {
       return res.status(402).json({
         error: "Solde insuffisant",
         remaining: 0,
       });
     }
 
-    // si pas de clé OpenAI -> mode test
+    // si pas de clé OpenAI => mode démo sans facturation
     if (!OPENAI_API_KEY) {
       pushTurn(userId, "user", message || "(photo)");
       const fake = "Mode test: ajoute ta clé OPENAI_API_KEY sur Render.";
       pushTurn(userId, "assistant", fake);
       return res.json({
         reply: fake,
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-        remaining: remaining,
+        usage: { total_tokens: 0 },
+        remaining: wallet.tokens,
+        verified: wallet.verified,
+        email: wallet.email,
       });
     }
 
-    // construire la conversation
+    // construire le prompt avec historique
     const messages = buildMessages(userId, message || "", imageDataUrl);
 
-    // appel OpenAI GPT-4 Turbo
+    // Appel OpenAI
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -221,39 +215,36 @@ app.post("/api/chat", async (req, res) => {
     const j = await r.json();
     if (!r.ok) {
       console.error(j);
-      return res.status(500).json({ error: j.error?.message || "OpenAI error" });
+      return res
+        .status(500)
+        .json({ error: j.error?.message || "OpenAI error" });
     }
 
     const reply =
       j?.choices?.[0]?.message?.content?.trim() ||
       "Désolé, pas de réponse.";
+    const usedTokens = Number(j?.usage?.total_tokens || 0);
 
-    const usage = j?.usage || {
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0,
-    };
-
-    // mettre à jour la mémoire
+    // mémoriser tour
     pushTurn(userId, "user", message || "(photo)");
     pushTurn(userId, "assistant", reply);
 
-    // décrémenter les tokens restants
-    const used = Number(usage.total_tokens || 0); // tokens OpenAI réels
-    const newBalance = Math.max(0, remaining - used);
-    setBalance(userId, newBalance);
+    // décrémente les tokens du wallet
+    wallet.tokens = Math.max(0, wallet.tokens - usedTokens);
 
     res.json({
       reply,
-      usage,
-      remaining: newBalance,
+      remaining: wallet.tokens,
+      used: usedTokens,
+      verified: wallet.verified,
+      email: wallet.email,
     });
-  } catch (err) {
-    console.error(err);
+  } catch (e) {
+    console.error(e);
     res.status(500).json({ error: "Erreur serveur" });
   }
 });
 
 app.listen(PORT, () => {
-  console.log("✅ Philomène IA backend démarré sur le port", PORT);
+  console.log("✅ API Philomène IA sur port", PORT);
 });
