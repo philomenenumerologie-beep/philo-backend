@@ -16,10 +16,11 @@ app.use(cors({
 
 app.use(express.json());
 
+// ta clé doit être configurée en variable d'environnement OPENAI_API_KEY dans Render
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = "gpt-4o-mini";
 
-// route POST /ask
+// route qui répond aux messages
 app.post("/ask", async (req, res) => {
   try {
     const { conversation } = req.body; // tableau [{role, content}, ...]
@@ -54,7 +55,7 @@ app.post("/ask", async (req, res) => {
   }
 });
 
-// GET / pour test navigateur
+// test GET /
 app.get("/", (_req, res) => {
   res.send("✅ API Philomène I.A. en ligne.");
 });
