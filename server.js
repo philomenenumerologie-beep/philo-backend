@@ -6,8 +6,8 @@ const app = express();
 app.use(express.json());
 app.use(
   cors({
-    origin: ["https://philomeneia.com", "http://localhost:3000"],
-    methods: ["POST", "GET"],
+    origin: "*",
+    methods: ["GET", "POST"],
     allowedHeaders: ["Content-Type"],
   })
 );
