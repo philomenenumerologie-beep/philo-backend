@@ -1,7 +1,7 @@
 {
   "name": "philomene-backend",
   "version": "1.0.0",
-  "description": "API Philomène I.A. avec tokens, mémoire utilisateur persistante et modèle GPT-5",
+  "description": "API Philomène I.A. avec GPT-5, mémoire persistante et gestion des tokens.",
   "type": "module",
   "main": "server.js",
   "scripts": {
@@ -12,6 +12,6 @@
     "cors": "^2.8.5",
     "node-fetch": "^3.3.2",
     "sqlite3": "^5.1.6",
-    "sqlite": "^5.1.6"
+    "sqlite": "^4.2.1"
   }
 }
