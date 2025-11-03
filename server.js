@@ -10,12 +10,23 @@ import { fileURLToPath } from "url";
 import path from "path";
 
 // =======================
-// CONFIG DE BASE
+// CONFIG
 // =======================
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = "gpt-4o-mini"; // tu pourras mettre ton modèle "GPT-5" ici plus tard
 
-// Création Express
+// IMPORTANT : ta clé OpenAI doit être définie dans Render
+// comme variable d'environnement OPENAI_API_KEY
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// On sert bien le modèle premium que tu vends comme "GPT-5"
+const OPENAI_MODEL = "gpt-5";
+
+// Nombre maximum de messages mémorisés par utilisateur
+// 40 messages = ~20 allers/retours récents
+const MAX_HISTORY_MESSAGES = 40;
+
+// =======================
+// EXPRESS SETUP
+// =======================
 const app = express();
 
 app.use(cors({
@@ -27,20 +38,29 @@ app.use(cors({
   allowedHeaders: ["Content-Type"]
 }));
 
+// on accepte des payloads un peu gros pour plus tard (images encodées, etc.)
 app.use(express.json({ limit: "15mb" }));
 
 // =======================
-// SQLITE (mémoire persistante)
+// SQLITE SETUP (mémoire persistante)
 // =======================
 //
-// On stocke tous les messages dans une base locale "memory.db"
-// Schéma : messages(userId, ts, role, content)
+// On stocke chaque message échangé entre un user et Philomène
+// dans une base SQLite locale "memory.db".
 //
-// Avantages :
-// - On se souvient des users même après redémarrage
-// - Pas besoin de tout garder en RAM
+// Schéma table:
 //
-// On limitera à 40 derniers messages par utilisateur (≈ 20 tours).
+// messages(
+//   id INTEGER PRIMARY KEY AUTOINCREMENT,
+//   userId TEXT NOT NULL,
+//   ts INTEGER NOT NULL,
+//   role TEXT NOT NULL,        // "user" ou "assistant"
+//   content TEXT NOT NULL
+// )
+//
+// => Avantage :
+// - Mémoire par utilisateur qui survit aux redémarrages Render
+// - On peut recharger le contexte à chaque question pour qu'elle se "souvienne"
 //
 
 const __filename = fileURLToPath(import.meta.url);
@@ -49,14 +69,13 @@ const DB_PATH = path.join(__dirname, "memory.db");
 
 let db;
 
-// ouverture de la base sqlite et création table si pas existe
+// ouvre/initialise la base
 async function initDB() {
   db = await open({
     filename: DB_PATH,
     driver: sqlite3.Database
   });
 
-  // table messages
   await db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,23 +87,23 @@ async function initDB() {
   `);
 }
 
-// récupérer les 40 derniers messages d'un user, triés du plus vieux au plus récent
+// récupère historique récent pour un user, en ordre chronologique
 async function getUserHistory(userId) {
   if (!userId) userId = "guest";
 
-  // on prend les 40 derniers messages
+  // Récupère les 40 derniers messages de ce user (par timestamp DESC)
   const rows = await db.all(
     `
     SELECT role, content, ts
     FROM messages
     WHERE userId = ?
     ORDER BY ts DESC
-    LIMIT 40
+    LIMIT ?
     `,
-    [userId]
+    [userId, MAX_HISTORY_MESSAGES]
   );
 
-  // rows est "du plus récent au plus vieux", on les remet dans l'ordre normal (ancien -> récent)
+  // rows est du plus récent -> plus vieux, on renverse
   return rows.reverse().map(r => ({
     role: r.role,
     content: r.content,
@@ -92,10 +111,11 @@ async function getUserHistory(userId) {
   }));
 }
 
-// ajoute un message dans la base
+// ajoute UN message en base
 async function addMessage(userId, role, content) {
   if (!userId) userId = "guest";
   const now = Date.now();
+
   await db.run(
     `
     INSERT INTO messages (userId, ts, role, content)
@@ -104,15 +124,15 @@ async function addMessage(userId, role, content) {
     [userId, now, role, content]
   );
 
-  // après insertion, on limite l'historique à 40 derniers messages
+  // Après insertion, on limite le total aux MAX_HISTORY_MESSAGES derniers
   await trimHistory(userId);
 }
 
-// garde seulement les 40 messages les + récents pour ce user
+// garde seulement les MAX_HISTORY_MESSAGES plus récents pour ce user
 async function trimHistory(userId) {
   if (!userId) userId = "guest";
 
-  // on récupère les id triés du plus récent au plus vieux
+  // on chope tous les id du plus récent au plus vieux
   const rows = await db.all(
     `
     SELECT id
@@ -123,11 +143,10 @@ async function trimHistory(userId) {
     [userId]
   );
 
-  // si 40 ou moins => rien à faire
-  if (rows.length <= 40) return;
+  if (rows.length <= MAX_HISTORY_MESSAGES) return;
 
-  // tous les messages qu'on DOIT supprimer = du 41ème jusqu'au dernier
-  const toDelete = rows.slice(40);
+  // tous les messages en trop, à effacer
+  const toDelete = rows.slice(MAX_HISTORY_MESSAGES); // tout après le plus récent bloc
 
   const ids = toDelete.map(r => r.id);
   const placeholders = ids.map(() => "?").join(",");
@@ -142,34 +161,40 @@ async function trimHistory(userId) {
 // ROUTE /ask
 // =======================
 //
-// Le front t'envoie :
+// Le front envoie :
 // {
-//   conversation: [...],   // il l'envoie encore mais on va surtout prendre le dernier message user
 //   userId: "xxx" ou "guest",
-//   tokens: 12345
+//   tokens: 1234567,             // solde affiché côté front AVANT demande
+//   conversation: [ ... ]        // historique côté front (on va juste s'en servir
+//                                // pour choper le dernier message user envoyé)
 // }
 //
-// On fait :
-// - On va chercher l'historique en base (jusqu'à 40 messages récents)
-// - On ajoute le nouveau message user dedans et on le stocke en base
-// - On envoie tout ça à OpenAI
-// - On reçoit la réponse IA
-// - On stocke aussi la réponse IA en base
-// - On calcule combien de tokens consommer (juste la réponse IA = completion_tokens)
-// - On renvoie new_balance au front
+// Nous on fait :
+// 1. On récupère l'historique stocké en base pour ce user
+// 2. On extrait le DERNIER message "user" fourni par le front
+// 3. On l'ajoute en base
+// 4. On envoie tout l'historique (limité) à OpenAI GPT-5
+// 5. On stocke la réponse assistant en base
+// 6. On calcule combien de tokens ont été VRAIMENT utilisés
+//    -> on utilise *total_tokens*, pas juste la sortie
+//    -> total_tokens inclut texte utilisateur, historique envoyé,
+//       réponse IA, vision, doc, etc.
+//    => c'est EXACTEMENT ce que tu veux : "tout ce que tu fais, c'est ton compteur"
+// 7. On renvoie la réponse + le nouveau solde
 //
 app.post("/ask", async (req, res) => {
   try {
     const { userId, tokens, conversation } = req.body;
 
-    // solde actuel vu par le front
+    // solde vu par le front avant la requête
     const previousBalance =
       (typeof tokens === "number" && tokens >= 0) ? tokens : 0;
 
-    // 1. récupérer l'historique en base
+    // 1. charger la mémoire persistante de cet utilisateur
     let history = await getUserHistory(userId);
 
-    // 2. trouver le dernier message user envoyé dans cette requête
+    // 2. récupérer le dernier message USER envoyé depuis le front
+    //    (c'est le texte qu'il vient d'écrire)
     let latestUserMsg = null;
     if (Array.isArray(conversation)) {
       for (let i = conversation.length - 1; i >= 0; i--) {
@@ -180,16 +205,20 @@ app.post("/ask", async (req, res) => {
       }
     }
 
-    if (!latestUserMsg || typeof latestUserMsg !== "string" || latestUserMsg.trim() === "") {
+    if (
+      !latestUserMsg ||
+      typeof latestUserMsg !== "string" ||
+      latestUserMsg.trim() === ""
+    ) {
       return res.status(400).json({ error: "Aucun message utilisateur valide reçu." });
     }
 
-    // 3. on ajoute ce message user en base et dans l'historique mémoire qu'on va envoyer à l'IA
+    // 3. on ajoute ce message user dans la base ET dans l'historique qu'on va envoyer à OpenAI
     await addMessage(userId, "user", latestUserMsg);
     history.push({ role: "user", content: latestUserMsg });
 
-    // 4. appel OpenAI avec l'historique mis à jour
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    // 4. appel OpenAI GPT-5 avec tout l'historique récent
+    const openaiResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -205,29 +234,44 @@ app.post("/ask", async (req, res) => {
       })
     });
 
-    const data = await response.json();
+    const data = await openaiResp.json();
 
     if (!data || !data.choices || !data.choices[0]) {
       console.error("Réponse OpenAI inattendue:", data);
       return res.status(500).json({ error: "Réponse invalide d'OpenAI." });
     }
 
-    // 5. réponse texte de l'IA
+    // 5. texte de la réponse IA (Philomène)
     const answer = data.choices[0].message?.content || "";
 
-    // 6. on stocke la réponse de l'assistante dans la base
+    // on sauvegarde aussi la réponse assistante dans la base
     await addMessage(userId, "assistant", answer);
 
-    // 7. tokens consommés = seulement la sortie IA
-    const completionTokens =
-      (data.usage && (data.usage.completion_tokens || data.usage.completionTokens)) || 0;
+    // 6. calcul des tokens consommés
+    //
+    // ICI point TRÈS IMPORTANT :
+    // on prend usage.total_tokens
+    // => ça inclut tout : prompt + historique + sortie + vision + doc
+    // => donc si l'utilisateur envoie une photo, un PDF énorme,
+    //    c'est LUI qui paie en jetons (pas toi manuellement)
+    //
+    const usage = data.usage || {};
+    const totalTokensUsed =
+      usage.total_tokens ??
+      usage.totalTokens ??
+      (
+        (usage.prompt_tokens || usage.promptTokens || 0) +
+        (usage.completion_tokens || usage.completionTokens || 0)
+      );
 
-    const consumedTokens = Math.max(1, completionTokens);
+    // sécurité : au moins 1 token consommé
+    const consumedTokens = Math.max(1, totalTokensUsed);
 
+    // 7. calcul du nouveau solde utilisateur
     let newBalance = previousBalance - consumedTokens;
     if (newBalance < 0) newBalance = 0;
 
-    // 8. on renvoie au front ce qu'il attend
+    // 8. renvoyer tout ça au front
     return res.json({
       answer,
       used_tokens: consumedTokens,
@@ -241,9 +285,9 @@ app.post("/ask", async (req, res) => {
   }
 });
 
-// simple check route
+// route de test basique
 app.get("/", (_req, res) => {
-  res.send("✅ API Philomène I.A. en ligne (mémoire persistante activée).");
+  res.send("✅ API Philomène I.A. en ligne (GPT-5, mémoire persistante, tokens réels).");
 });
 
 // =======================
