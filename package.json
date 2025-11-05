@@ -1,16 +1,32 @@
 {
-  "name": "philo-backend",
+  "name": "philomene-backend",
   "version": "1.0.0",
-  "description": "Backend Philomène I.A. (GPT-5, mémoire côté serveur, tokens réels).",
+  "description": "Backend officiel de Philomène I.A. — GPT-5, mémoire serveur, gestion des tokens et paiements PayPal.",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "nodemon server.js"
   },
   "dependencies": {
-    "express": "^4.19.0",
     "cors": "^2.8.5",
-    "node-fetch": "^3.3.2",
-    "multer": "^1.4.5-lts.1"
-  }
+    "dotenv": "^16.4.5",
+    "express": "^4.19.0",
+    "multer": "^1.4.5-lts.1",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "philomene",
+    "gpt-5",
+    "openai",
+    "backend",
+    "paypal",
+    "ai",
+    "assistant"
+  ],
+  "author": "Philomène I.A. Project",
+  "license": "MIT"
 }
