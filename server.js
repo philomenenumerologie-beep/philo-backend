@@ -3,31 +3,7 @@
 // - /ask : conversation texte
 // - /analyze-image : analyse d'image
 // - /config : infos publiques paiement (PayPal)
-// - mémoire de conversation par utilisateur
-// ------------------------------------------------------------
-//
-// ATTENTION : package.json :
-// {
-//   "name": "philomene-backend",
-//   "version": "1.0.0",
-//   "description": "API Philomène I.A. avec GPT-5, mémoire persistante et gestion des tokens.",
-//   "type": "module",
-//   "main": "server.js",
-//   "scripts": { "start": "node server.js" },
-//   "dependencies": {
-//     "express": "^4.19.0",
-//     "cors": "^2.8.5",
-//     "node-fetch": "^3.3.2",
-//     "multer": "^1.4.5-lts.1"
-//   }
-// }
-//
-// Variables Render requises :
-//  - OPENAI_API_KEY
-//  - PAYMENT_ENABLED=true|false
-//  - PAYPAL_CLIENT_ID
-//  - PAYPAL_CLIENT_SECRET (utile côté backend si tu ajoutes des vérifs serveur plus tard)
-//  - PAYPAL_MODE=sandbox|live
+// - mémoire de conversation en RAM (simple)
 // ------------------------------------------------------------
 
 import express from "express";
@@ -35,35 +11,46 @@ import cors from "cors";
 import fetch from "node-fetch";
 import multer from "multer";
 
+// (optionnel, utile en local)
+try { await import('dotenv').then(m => m.default.config()); } catch {}
+
 const app = express();
+app.set('trust proxy', true);
 
 // ===========================
-// CONFIG GÉNÉRALE
+// CONFIG
 // ===========================
+const {
+  OPENAI_API_KEY = "",
+  OPENAI_MODEL_TEXT = "gpt-4o-mini",
+  OPENAI_MODEL_VISION = "gpt-4o-mini",
+  PAYMENT_ENABLED = "false",
+  PAYPAL_CLIENT_ID = "",
+  PAYPAL_MODE = "sandbox"
+} = process.env;
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "A_METTRE_DANS_RENDER";
+if (!OPENAI_API_KEY) {
+  console.warn("⚠️  OPENAI_API_KEY manquant. Mets-le dans Render → Environment.");
+}
 
-// Choix des modèles (tu pourras basculer vers GPT-5 ici quand tu veux)
-const OPENAI_MODEL_TEXT = "gpt-4o-mini";
-const OPENAI_MODEL_VISION = "gpt-4o-mini";
-
-// Limites d'upload / JSON
+// Limites d’upload / JSON
 app.use(express.json({ limit: "15mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// CORS : autorise ton site (et préflight)
+const corsOpts = {
+  origin: ["https://philomeneia.com", "https://www.philomeneia.com"],
+  methods: ["POST", "GET", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+};
+app.use(cors(corsOpts));
+app.options("*", cors(corsOpts));
 
 // Multer pour les images
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
 });
-
-// CORS : autorise ton site
-app.use(
-  cors({
-    origin: ["https://philomeneia.com", "https://www.philomeneia.com"],
-    methods: ["POST", "GET", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"]
-  })
-);
 
 // ===========================
 // MÉMOIRE DE CONVERSATION (RAM)
@@ -103,17 +90,23 @@ async function askOpenAIText(messages) {
   const body = { model: OPENAI_MODEL_TEXT, messages };
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify(body)
   });
+
   if (!resp.ok) {
     const textErr = await resp.text();
     console.error("❌ OpenAI /text status:", resp.status);
     console.error("❌ OpenAI /text body:", textErr);
-    throw new Error("Erreur API OpenAI (texte)");
+    throw new Error(`Erreur API OpenAI (texte) ${resp.status}`);
   }
+
   const data = await resp.json();
-  return data?.choices?.[0]?.message?.content?.trim() || "Je n'ai pas pu générer de réponse.";
+  const answer = data?.choices?.[0]?.message?.content?.trim();
+  return answer || "Je n'ai pas pu générer de réponse.";
 }
 
 async function askOpenAIVision({ question, dataUrl }) {
@@ -132,19 +125,26 @@ async function askOpenAIVision({ question, dataUrl }) {
     }
   ];
   const body = { model: OPENAI_MODEL_VISION, messages };
+
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify(body)
   });
+
   if (!resp.ok) {
     const textErr = await resp.text();
     console.error("❌ OpenAI /vision status:", resp.status);
     console.error("❌ OpenAI /vision body:", textErr);
-    throw new Error("Erreur API OpenAI (vision)");
+    throw new Error(`Erreur API OpenAI (vision) ${resp.status}`);
   }
+
   const data = await resp.json();
-  return data?.choices?.[0]?.message?.content?.trim() || "Image reçue, mais impossible de l'analyser.";
+  const answer = data?.choices?.[0]?.message?.content?.trim();
+  return answer || "Image reçue, mais impossible de l'analyser.";
 }
 
 // ===========================
@@ -155,6 +155,7 @@ app.post("/ask", async (req, res) => {
     const { conversation, userId, tokens } = req.body || {};
     const uid = userId || "guest";
 
+    // Dernier message user depuis le front
     let lastUserMessage = null;
     if (Array.isArray(conversation)) {
       for (let i = conversation.length - 1; i >= 0; i--) {
@@ -165,15 +166,19 @@ app.post("/ask", async (req, res) => {
         }
       }
     }
+
     if (!lastUserMessage) {
       return res.status(400).json({ error: "Pas de message utilisateur reçu." });
     }
 
+    // Mémoire
     pushToConversation(uid, "user", lastUserMessage);
-
     const fullHistory = getConversationHistory(uid);
+
+    // Réponse OpenAI
     const answer = await askOpenAIText(fullHistory);
 
+    // Sauvegarde réponse
     pushToConversation(uid, "assistant", answer);
 
     res.json({ answer, tokensLeft: tokens });
@@ -210,11 +215,10 @@ app.post("/analyze-image", upload.single("image"), async (req, res) => {
 // ===========================
 // CONFIG PUBLIQUE POUR LE FRONT (PayPal)
 // ===========================
-// Utilisé par le front (scripts.js) pour initialiser les paiements.
 app.get("/config", (_req, res) => {
-  const paymentsEnabled = String(process.env.PAYMENT_ENABLED || "false") === "true";
-  const paypalClientId = process.env.PAYPAL_CLIENT_ID || null;
-  const mode = process.env.PAYPAL_MODE || "sandbox";
+  const paymentsEnabled = String(PAYMENT_ENABLED || "false") === "true";
+  const paypalClientId = PAYPAL_CLIENT_ID || null;
+  const mode = PAYPAL_MODE || "sandbox";
   res.json({ paymentsEnabled, paypalClientId, mode });
 });
 
