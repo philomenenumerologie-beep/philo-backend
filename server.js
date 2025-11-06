@@ -1,9 +1,9 @@
 // server.js
 // Backend Philomène I.A.
-// - /ask : conversation texte
-// - /analyze-image : analyse d'image
-// - /config : infos publiques paiement (PayPal)
-// - mémoire de conversation en RAM (simple)
+// - /ask : conversation texte (gpt-4o-mini, fallback gpt-4o)
+// - /analyze-image : analyse d'image (gpt-4o)
+// - /config : infos publiques paiement + crédits gratuits
+// - mémoire de conversation en RAM
 // ------------------------------------------------------------
 
 import express from "express";
@@ -46,6 +46,12 @@ const {
   OPENAI_API_KEY = "",
   OPENAI_MODEL_TEXT = "gpt-4o-mini",
   OPENAI_MODEL_VISION = "gpt-4o",
+
+  // ➜ crédits gratuits (expo dans /config)
+  FREE_ANON = "2000",
+  FREE_AFTER_SIGNUP = "3000",
+
+  // Paiement
   PAYMENT_ENABLED,
   PAYMENTS_ENABLED,
   PAYPAL_CLIENT_ID = "",
@@ -232,12 +238,15 @@ app.post("/analyze-image", upload.single("image"), async (req, res) => {
 });
 
 // ------------------------------------------------------------
-// CONFIG PUBLIQUE POUR LE FRONT (PayPal)
+// CONFIG PUBLIQUE POUR LE FRONT (PayPal + crédits gratuits)
 // ------------------------------------------------------------
 app.get("/config", (_req, res) => {
   const paymentsEnabled = envTrue(PAYMENT_ENABLED) || envTrue(PAYMENTS_ENABLED);
   const paypalClientId = (PAYPAL_CLIENT_ID || "").trim().replace(/\s+/g, "");
   const mode = (PAYPAL_MODE || "sandbox").trim();
+
+  const freeAnon = Number(FREE_ANON) || 0;
+  const freeAfterSignup = Number(FREE_AFTER_SIGNUP) || 0;
 
   res.set({
     "Cache-Control": "no-store, max-age=0",
@@ -245,7 +254,13 @@ app.get("/config", (_req, res) => {
     Expires: "0",
   });
 
-  res.json({ paymentsEnabled, paypalClientId, mode });
+  res.json({
+    paymentsEnabled,
+    paypalClientId,
+    mode,
+    freeAnon,
+    freeAfterSignup,
+  });
 });
 
 // ------------------------------------------------------------
@@ -261,4 +276,5 @@ app.get("/", (_req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🚀 Philomène backend démarré sur le port " + PORT);
+  console.log("🧠 Models:", { text: OPENAI_MODEL_TEXT, vision: OPENAI_MODEL_VISION });
 });
