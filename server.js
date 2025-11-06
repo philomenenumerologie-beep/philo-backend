@@ -12,26 +12,13 @@ import fetch from "node-fetch";
 import multer from "multer";
 
 // (optionnel, utile en local)
-try { await import('dotenv').then(m => m.default.config()); } catch {}
+try { await import("dotenv").then(m => m.default.config()); } catch {}
 
+// ------------------------------------------------------------
+// App & middlewares
+// ------------------------------------------------------------
 const app = express();
-app.set('trust proxy', true);
-
-// ===========================
-// CONFIG
-// ===========================
-const {
-  OPENAI_API_KEY = "",
-  OPENAI_MODEL_TEXT = "gpt-4o-mini",
-  OPENAI_MODEL_VISION = "gpt-4o-mini",
-  PAYMENT_ENABLED = "false",
-  PAYPAL_CLIENT_ID = "",
-  PAYPAL_MODE = "sandbox"
-} = process.env;
-
-if (!OPENAI_API_KEY) {
-  console.warn("⚠️  OPENAI_API_KEY manquant. Mets-le dans Render → Environment.");
-}
+app.set("trust proxy", true);
 
 // Limites d’upload / JSON
 app.use(express.json({ limit: "15mb" }));
@@ -41,7 +28,7 @@ app.use(express.urlencoded({ extended: true }));
 const corsOpts = {
   origin: ["https://philomeneia.com", "https://www.philomeneia.com"],
   methods: ["POST", "GET", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  allowedHeaders: ["Content-Type", "Authorization"],
 };
 app.use(cors(corsOpts));
 app.options("*", cors(corsOpts));
@@ -49,12 +36,33 @@ app.options("*", cors(corsOpts));
 // Multer pour les images
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
 });
 
-// ===========================
+// ------------------------------------------------------------
+// CONFIG ENV
+// ------------------------------------------------------------
+const {
+  OPENAI_API_KEY = "",
+  OPENAI_MODEL_TEXT = "gpt-4o-mini",
+  OPENAI_MODEL_VISION = "gpt-4o-mini",
+  // Compat : on accepte PAYMENT_ENABLED OU PAYMENTS_ENABLED
+  PAYMENT_ENABLED,
+  PAYMENTS_ENABLED,
+  PAYPAL_CLIENT_ID = "",
+  PAYPAL_MODE = "sandbox",
+} = process.env;
+
+// utilitaire booléen
+const envTrue = (v) => String(v ?? "").trim().toLowerCase() === "true";
+
+if (!OPENAI_API_KEY) {
+  console.warn("⚠️  OPENAI_API_KEY manquant. Mets-le dans Render → Environment.");
+}
+
+// ------------------------------------------------------------
 // MÉMOIRE DE CONVERSATION (RAM)
-// ===========================
+// ------------------------------------------------------------
 const conversations = {};
 
 function getConversationHistory(userId) {
@@ -65,8 +73,8 @@ function getConversationHistory(userId) {
         content:
           "Tu es Philomène I.A., une assistante personnelle française. " +
           "Réponds clairement, simplement, sans blabla inutile. " +
-          "Sois sympa et directe, avec des infos concrètes."
-      }
+          "Sois sympa et directe, avec des infos concrètes.",
+      },
     ];
   }
   return conversations[userId];
@@ -83,18 +91,18 @@ function pushToConversation(userId, role, content) {
   }
 }
 
-// ===========================
+// ------------------------------------------------------------
 // APPELS OPENAI
-// ===========================
+// ------------------------------------------------------------
 async function askOpenAIText(messages) {
   const body = { model: OPENAI_MODEL_TEXT, messages };
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
@@ -114,15 +122,15 @@ async function askOpenAIVision({ question, dataUrl }) {
     {
       role: "system",
       content:
-        "Tu es Philomène I.A., assistante française. Analyse l'image et explique clairement ce qu'il y a dessus. Si tu n'es pas sûre, dis-le."
+        "Tu es Philomène I.A., assistante française. Analyse l'image et explique clairement ce qu'il y a dessus. Si tu n'es pas sûre, dis-le.",
     },
     {
       role: "user",
       content: [
         { type: "text", text: question || "Analyse l'image." },
-        { type: "image_url", image_url: dataUrl }
-      ]
-    }
+        { type: "image_url", image_url: dataUrl },
+      ],
+    },
   ];
   const body = { model: OPENAI_MODEL_VISION, messages };
 
@@ -130,9 +138,9 @@ async function askOpenAIVision({ question, dataUrl }) {
     method: "POST",
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
@@ -147,9 +155,9 @@ async function askOpenAIVision({ question, dataUrl }) {
   return answer || "Image reçue, mais impossible de l'analyser.";
 }
 
-// ===========================
+// ------------------------------------------------------------
 // ROUTES IA
-// ===========================
+// ------------------------------------------------------------
 app.post("/ask", async (req, res) => {
   try {
     const { conversation, userId, tokens } = req.body || {};
@@ -191,7 +199,8 @@ app.post("/ask", async (req, res) => {
 app.post("/analyze-image", upload.single("image"), async (req, res) => {
   try {
     const uid = req.body?.userId || "guest";
-    const userPrompt = req.body?.prompt || "Décris précisément l'image et à quoi elle sert.";
+    const userPrompt =
+      req.body?.prompt || "Décris précisément l'image et à quoi elle sert.";
 
     if (!req.file) return res.status(400).json({ error: "Aucune image reçue." });
 
@@ -212,26 +221,38 @@ app.post("/analyze-image", upload.single("image"), async (req, res) => {
   }
 });
 
-// ===========================
+// ------------------------------------------------------------
 // CONFIG PUBLIQUE POUR LE FRONT (PayPal)
-// ===========================
+// ------------------------------------------------------------
 app.get("/config", (_req, res) => {
-  const paymentsEnabled = String(PAYMENT_ENABLED || "false") === "true";
-  const paypalClientId = PAYPAL_CLIENT_ID || null;
-  const mode = PAYPAL_MODE || "sandbox";
+  // priorité à PAYMENT_ENABLED, fallback PAYMENTS_ENABLED
+  const paymentsEnabled = envTrue(PAYMENT_ENABLED) || envTrue(PAYMENTS_ENABLED);
+
+  // nettoie espaces / retours ligne accidentels
+  const paypalClientId = (PAYPAL_CLIENT_ID || "").trim().replace(/\s+/g, "");
+
+  const mode = (PAYPAL_MODE || "sandbox").trim();
+
+  // évite le cache agressif (surtout mobile)
+  res.set({
+    "Cache-Control": "no-store, max-age=0",
+    Pragma: "no-cache",
+    Expires: "0",
+  });
+
   res.json({ paymentsEnabled, paypalClientId, mode });
 });
 
-// ===========================
+// ------------------------------------------------------------
 // HEALTHCHECK
-// ===========================
+// ------------------------------------------------------------
 app.get("/", (_req, res) => {
   res.send("✅ API Philomène I.A. en ligne (GPT-5, mémoire, tokens).");
 });
 
-// ===========================
+// ------------------------------------------------------------
 // LANCEMENT SERVEUR
-// ===========================
+// ------------------------------------------------------------
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🚀 Philomène backend démarré sur le port " + PORT);
