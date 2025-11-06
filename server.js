@@ -24,7 +24,7 @@ app.set("trust proxy", true);
 app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORS : autorise ton site (et préflight)
+// CORS : autorise ton site
 const corsOpts = {
   origin: ["https://philomeneia.com", "https://www.philomeneia.com"],
   methods: ["POST", "GET", "OPTIONS"],
@@ -45,15 +45,13 @@ const upload = multer({
 const {
   OPENAI_API_KEY = "",
   OPENAI_MODEL_TEXT = "gpt-4o-mini",
-  OPENAI_MODEL_VISION = "gpt-4o-mini",
-  // Compat : on accepte PAYMENT_ENABLED OU PAYMENTS_ENABLED
+  OPENAI_MODEL_VISION = "gpt-4o",
   PAYMENT_ENABLED,
   PAYMENTS_ENABLED,
   PAYPAL_CLIENT_ID = "",
   PAYPAL_MODE = "sandbox",
 } = process.env;
 
-// utilitaire booléen
 const envTrue = (v) => String(v ?? "").trim().toLowerCase() === "true";
 
 if (!OPENAI_API_KEY) {
@@ -83,7 +81,7 @@ function getConversationHistory(userId) {
 function pushToConversation(userId, role, content) {
   const history = getConversationHistory(userId);
   history.push({ role, content });
-  const MAX_MESSAGES = 60; // system + derniers tours
+  const MAX_MESSAGES = 60;
   if (history.length > MAX_MESSAGES) {
     const systemMsg = history[0];
     const lastMsgs = history.slice(-MAX_MESSAGES + 1);
@@ -96,25 +94,41 @@ function pushToConversation(userId, role, content) {
 // ------------------------------------------------------------
 async function askOpenAIText(messages) {
   const body = { model: OPENAI_MODEL_TEXT, messages };
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
 
-  if (!resp.ok) {
-    const textErr = await resp.text();
-    console.error("❌ OpenAI /text status:", resp.status);
-    console.error("❌ OpenAI /text body:", textErr);
-    throw new Error(`Erreur API OpenAI (texte) ${resp.status}`);
+  try {
+    // premier essai : modèle rapide (gpt-4o-mini)
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) throw new Error("Mini model failed");
+
+    const data = await resp.json();
+    const answer = data?.choices?.[0]?.message?.content?.trim();
+    return answer || "Je n'ai pas pu générer de réponse.";
+  } catch {
+    // fallback vers GPT-4o complet
+    console.warn("⚠️ gpt-4o-mini indisponible, fallback vers gpt-4o");
+    body.model = "gpt-4o";
+    const retry = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    const data = await retry.json();
+    return (
+      data?.choices?.[0]?.message?.content?.trim() ||
+      "Réponse générée avec le modèle complet."
+    );
   }
-
-  const data = await resp.json();
-  const answer = data?.choices?.[0]?.message?.content?.trim();
-  return answer || "Je n'ai pas pu générer de réponse.";
 }
 
 async function askOpenAIVision({ question, dataUrl }) {
@@ -163,7 +177,6 @@ app.post("/ask", async (req, res) => {
     const { conversation, userId, tokens } = req.body || {};
     const uid = userId || "guest";
 
-    // Dernier message user depuis le front
     let lastUserMessage = null;
     if (Array.isArray(conversation)) {
       for (let i = conversation.length - 1; i >= 0; i--) {
@@ -179,14 +192,11 @@ app.post("/ask", async (req, res) => {
       return res.status(400).json({ error: "Pas de message utilisateur reçu." });
     }
 
-    // Mémoire
     pushToConversation(uid, "user", lastUserMessage);
     const fullHistory = getConversationHistory(uid);
 
-    // Réponse OpenAI
     const answer = await askOpenAIText(fullHistory);
 
-    // Sauvegarde réponse
     pushToConversation(uid, "assistant", answer);
 
     res.json({ answer, tokensLeft: tokens });
@@ -225,15 +235,10 @@ app.post("/analyze-image", upload.single("image"), async (req, res) => {
 // CONFIG PUBLIQUE POUR LE FRONT (PayPal)
 // ------------------------------------------------------------
 app.get("/config", (_req, res) => {
-  // priorité à PAYMENT_ENABLED, fallback PAYMENTS_ENABLED
   const paymentsEnabled = envTrue(PAYMENT_ENABLED) || envTrue(PAYMENTS_ENABLED);
-
-  // nettoie espaces / retours ligne accidentels
   const paypalClientId = (PAYPAL_CLIENT_ID || "").trim().replace(/\s+/g, "");
-
   const mode = (PAYPAL_MODE || "sandbox").trim();
 
-  // évite le cache agressif (surtout mobile)
   res.set({
     "Cache-Control": "no-store, max-age=0",
     Pragma: "no-cache",
@@ -247,7 +252,7 @@ app.get("/config", (_req, res) => {
 // HEALTHCHECK
 // ------------------------------------------------------------
 app.get("/", (_req, res) => {
-  res.send("✅ API Philomène I.A. en ligne (GPT-5, mémoire, tokens).");
+  res.send("✅ API Philomène I.A. en ligne (GPT-4o, mémoire, tokens).");
 });
 
 // ------------------------------------------------------------
