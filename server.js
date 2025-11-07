@@ -12,7 +12,10 @@ import fetch from "node-fetch";
 import multer from "multer";
 
 // (optionnel, utile en local)
-try { await import("dotenv").then(m => m.default.config()); } catch {}
+try {
+  const dotenv = await import("dotenv");
+  dotenv.default.config();
+} catch {}
 
 // ------------------------------------------------------------
 // App & middlewares
@@ -87,6 +90,7 @@ function getConversationHistory(userId) {
 function pushToConversation(userId, role, content) {
   const history = getConversationHistory(userId);
   history.push({ role, content });
+
   const MAX_MESSAGES = 60;
   if (history.length > MAX_MESSAGES) {
     const systemMsg = history[0];
@@ -96,7 +100,7 @@ function pushToConversation(userId, role, content) {
 }
 
 // ------------------------------------------------------------
-// APPELS OPENAI
+// APPELS OPENAI - TEXTE
 // ------------------------------------------------------------
 async function askOpenAIText(messages) {
   const body = { model: OPENAI_MODEL_TEXT, messages };
@@ -117,41 +121,55 @@ async function askOpenAIText(messages) {
     const data = await resp.json();
     const answer = data?.choices?.[0]?.message?.content?.trim();
     return answer || "Je n'ai pas pu générer de réponse.";
-  } catch {
+  } catch (err) {
+    console.warn("⚠️ gpt-4o-mini indisponible, fallback vers gpt-4o :", err.message);
+
     // fallback vers GPT-4o complet
-    console.warn("⚠️ gpt-4o-mini indisponible, fallback vers gpt-4o");
-    body.model = "gpt-4o";
-    const retry = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    const data = await retry.json();
-    return (
-      data?.choices?.[0]?.message?.content?.trim() ||
-      "Réponse générée avec le modèle complet."
-    );
+    const fallbackBody = { ...body, model: "gpt-4o" };
+
+    try {
+      const retry = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(fallbackBody),
+      });
+
+      const data = await retry.json();
+      return (
+        data?.choices?.[0]?.message?.content?.trim() ||
+        "Réponse générée avec le modèle complet."
+      );
+    } catch (err2) {
+      console.error("❌ Erreur fallback gpt-4o :", err2);
+      return "Je rencontre un problème technique pour répondre pour le moment.";
+    }
   }
 }
 
+// ------------------------------------------------------------
+// APPELS OPENAI - VISION
+// ------------------------------------------------------------
 async function askOpenAIVision({ question, dataUrl }) {
   const messages = [
     {
       role: "system",
       content:
-        "Tu es Philomène I.A., assistante française. Analyse l'image et explique clairement ce qu'il y a dessus. Si tu n'es pas sûre, dis-le.",
+        "Tu es Philomène I.A., assistante française. Analyse l'image et explique clairement ce qu'il y a dessus. " +
+        "Si tu n'es pas sûre, dis-le honnêtement.",
     },
     {
       role: "user",
       content: [
         { type: "text", text: question || "Analyse l'image." },
-        { type: "image_url", image_url: dataUrl },
+        // ✅ Format correct attendu par l'API
+        { type: "image_url", image_url: { url: dataUrl } },
       ],
     },
   ];
+
   const body = { model: OPENAI_MODEL_VISION, messages };
 
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -178,6 +196,8 @@ async function askOpenAIVision({ question, dataUrl }) {
 // ------------------------------------------------------------
 // ROUTES IA
 // ------------------------------------------------------------
+
+// Texte
 app.post("/ask", async (req, res) => {
   try {
     const { conversation, userId, tokens } = req.body || {};
@@ -212,13 +232,16 @@ app.post("/ask", async (req, res) => {
   }
 });
 
+// Image
 app.post("/analyze-image", upload.single("image"), async (req, res) => {
   try {
     const uid = req.body?.userId || "guest";
     const userPrompt =
       req.body?.prompt || "Décris précisément l'image et à quoi elle sert.";
 
-    if (!req.file) return res.status(400).json({ error: "Aucune image reçue." });
+    if (!req.file) {
+      return res.status(400).json({ error: "Aucune image reçue." });
+    }
 
     const mimeType = req.file.mimetype || "image/jpeg";
     const base64 = req.file.buffer.toString("base64");
@@ -276,5 +299,8 @@ app.get("/", (_req, res) => {
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log("🚀 Philomène backend démarré sur le port " + PORT);
-  console.log("🧠 Models:", { text: OPENAI_MODEL_TEXT, vision: OPENAI_MODEL_VISION });
+  console.log("🧠 Models:", {
+    text: OPENAI_MODEL_TEXT,
+    vision: OPENAI_MODEL_VISION,
+  });
 });
