@@ -1,8 +1,9 @@
 // server.js
 // Backend Philomène I.A.
-// - /ask : conversation texte (gpt-4o-mini, fallback gpt-4o)
+// - /ask           : conversation texte (gpt-4o-mini, fallback gpt-4o)
 // - /analyze-image : analyse d'image (gpt-4o)
-// - /config : infos publiques paiement + crédits gratuits
+// - /barcode       : infos produit + NutriScore via OpenFoodFacts
+// - /config        : infos publiques paiement + crédits gratuits
 // - mémoire de conversation en RAM
 // ------------------------------------------------------------
 
@@ -164,7 +165,6 @@ async function askOpenAIVision({ question, dataUrl }) {
       role: "user",
       content: [
         { type: "text", text: question || "Analyse l'image." },
-        // ✅ Format correct attendu par l'API
         { type: "image_url", image_url: { url: dataUrl } },
       ],
     },
@@ -257,6 +257,53 @@ app.post("/analyze-image", upload.single("image"), async (req, res) => {
   } catch (err) {
     console.error("🔥 Erreur /analyze-image:", err);
     res.status(500).json({ error: "Erreur interne /analyze-image." });
+  }
+});
+
+// ------------------------------------------------------------
+// LECTURE CODE-BARRES → OpenFoodFacts
+// ------------------------------------------------------------
+app.get("/barcode", async (req, res) => {
+  try {
+    const code = (req.query.code || "").trim();
+    if (!code) {
+      return res.status(400).json({ error: "Aucun code-barres fourni." });
+    }
+
+    const url = `https://world.openfoodfacts.org/api/v0/product/${code}.json`;
+    const resp = await fetch(url);
+
+    if (!resp.ok) {
+      console.error("OpenFoodFacts status:", resp.status);
+      return res.status(500).json({ error: "Erreur OpenFoodFacts." });
+    }
+
+    const data = await resp.json();
+
+    if (data.status !== 1 || !data.product) {
+      return res.json({
+        found: false,
+        code,
+        message: "Produit introuvable dans OpenFoodFacts.",
+      });
+    }
+
+    const p = data.product;
+
+    res.json({
+      found: true,
+      code,
+      name: p.product_name || null,
+      brand: p.brands || null,
+      quantity: p.quantity || null,
+      nutriscore: p.nutrition_grade_fr || p.nutriscore_grade || null,
+      nova: p.nova_group || null,
+      eco_score: p.ecoscore_grade || null,
+      image: p.image_front_small_url || p.image_url || null,
+    });
+  } catch (err) {
+    console.error("🔥 Erreur /barcode:", err);
+    res.status(500).json({ error: "Erreur interne /barcode." });
   }
 });
 
