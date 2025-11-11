@@ -332,7 +332,67 @@ app.get("/config", (_req, res) => {
     freeAfterSignup,
   });
 });
+// ------------------------------------------------------------
+// LECTURE CODE-BARRES -> OpenFoodFacts
+// ------------------------------------------------------------
+app.get("/barcode", async (req, res) => {
+  try {
+    const code = (req.query.code || "").trim();
 
+    if (!code) {
+      return res.status(400).json({
+        found: false,
+        error: "Aucun code fourni.",
+      });
+    }
+
+    const url = `https://world.openfoodfacts.org/api/v2/product/${code}.json`;
+    const resp = await fetch(url);
+
+    if (!resp.ok) {
+      console.error("OpenFoodFacts HTTP:", resp.status);
+      return res.status(502).json({
+        found: false,
+        code,
+        error: "Erreur OpenFoodFacts.",
+      });
+    }
+
+    const data = await resp.json();
+
+    if (!data || data.status !== 1 || !data.product) {
+      return res.json({
+        found: false,
+        code,
+        message: "Produit introuvable dans la base.",
+      });
+    }
+
+    const p = data.product;
+
+    res.json({
+      found: true,
+      code,
+      name: p.product_name || p.generic_name || "",
+      brand: p.brands || "",
+      quantity: p.quantity || "",
+      nutriscore: p.nutriscore_grade || null,
+      nova: p.nova_group || null,
+      eco_score: p.ecoscore_grade || null,
+      image:
+        p.image_front_small_url ||
+        p.image_front_url ||
+        p.image_url ||
+        null,
+    });
+  } catch (err) {
+    console.error("🔥 Erreur /barcode:", err);
+    res.status(500).json({
+      found: false,
+      error: "Erreur serveur /barcode.",
+    });
+  }
+});
 // ------------------------------------------------------------
 // HEALTHCHECK
 // ------------------------------------------------------------
