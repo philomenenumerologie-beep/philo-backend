@@ -62,10 +62,17 @@ const {
   PAYPAL_MODE = "sandbox",
 } = process.env;
 
+// Clé Serper (actu en direct)
+const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
+
 const envTrue = (v) => String(v ?? "").trim().toLowerCase() === "true";
 
 if (!OPENAI_API_KEY) {
   console.warn("⚠️  OPENAI_API_KEY manquant. Mets-le dans Render → Environment.");
+}
+
+if (!SERPER_API_KEY) {
+  console.warn("ℹ️ SERPER_API_KEY absent : la recherche d’actualité est désactivée.");
 }
 
 // ------------------------------------------------------------
@@ -194,6 +201,125 @@ async function askOpenAIVision({ question, dataUrl }) {
 }
 
 // ------------------------------------------------------------
+// SERPER (ACTU EN DIRECT) – HELPERS
+// ------------------------------------------------------------
+
+// 1) Détecter si la question a besoin d’infos fraîches
+function needsFreshNews(question) {
+  const q = (question || "").toLowerCase();
+
+  const keywords = [
+    "aujourd'hui",
+    "en ce moment",
+    "en ce momment",
+    "actu",
+    "actualité",
+    "news",
+    "dernier",
+    "dernière",
+    "actuel",
+    "actuelle",
+    "qui est le président",
+    "qui est la présidente",
+    "qui est le premier ministre",
+    "qui est la première ministre",
+    "gouvernement",
+    "élection",
+    "election",
+    "guerre",
+    "conflit",
+    "score",
+    "résultat",
+    "résultats",
+    "2024",
+    "2025",
+    "2026",
+  ];
+
+  return keywords.some((k) => q.includes(k));
+}
+
+// 2) Appel Serper brut
+async function callSerperSearch(query) {
+  if (!SERPER_API_KEY) return null;
+
+  const body = {
+    q: query,
+    gl: "fr", // géo France
+    hl: "fr", // langue résultats
+    num: 5,
+  };
+
+  const resp = await fetch("https://google.serper.dev/search", {
+    method: "POST",
+    headers: {
+      "X-API-KEY": SERPER_API_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    console.error("❌ Serper status:", resp.status);
+    return null;
+  }
+
+  const data = await resp.json();
+  const organic = data.organic || [];
+  if (!organic.length) return null;
+
+  // On garde les 3 premiers résultats
+  const top = organic.slice(0, 3);
+  const summary = top
+    .map((r, idx) => {
+      const title = r.title || "";
+      const snippet = r.snippet || "";
+      const source = r.domain || r.link || "";
+      return `[${idx + 1}] ${title}\n${snippet}\n(source : ${source})`;
+    })
+    .join("\n\n");
+
+  return summary;
+}
+
+// 3) Essaie de répondre en utilisant Serper + OpenAI
+async function maybeAnswerWithNews(question) {
+  if (!needsFreshNews(question)) return null;
+  if (!SERPER_API_KEY) return null;
+
+  try {
+    const webSummary = await callSerperSearch(question);
+    if (!webSummary) return null;
+
+    const messages = [
+      {
+        role: "system",
+        content:
+          "Tu es Philomène I.A., une assistante française. " +
+          "Tu disposes d'informations d'actualité provenant d'Internet (Serper). " +
+          "Utilise-les pour répondre de manière à jour, claire et prudente. " +
+          "Si les infos ne sont pas claires ou se contredisent, dis-le.",
+      },
+      {
+        role: "user",
+        content:
+          `Question de l'utilisateur : ${question}\n\n` +
+          `Voici des informations récentes trouvées sur le web :\n` +
+          `${webSummary}\n\n` +
+          "Réponds en français, simplement, comme une assistante personnelle, " +
+          "en citant les éléments importants (dates, pays, rôle des personnes).",
+      },
+    ];
+
+    const answer = await askOpenAIText(messages);
+    return answer || null;
+  } catch (err) {
+    console.error("🔥 Erreur maybeAnswerWithNews:", err);
+    return null;
+  }
+}
+
+// ------------------------------------------------------------
 // ROUTES IA
 // ------------------------------------------------------------
 
@@ -218,11 +344,19 @@ app.post("/ask", async (req, res) => {
       return res.status(400).json({ error: "Pas de message utilisateur reçu." });
     }
 
+    // 1️⃣ On mémorise le message dans l'historique
     pushToConversation(uid, "user", lastUserMessage);
-    const fullHistory = getConversationHistory(uid);
 
-    const answer = await askOpenAIText(fullHistory);
+    // 2️⃣ Si c’est une question d'actualité -> on tente Serper d'abord
+    let answer = await maybeAnswerWithNews(lastUserMessage);
 
+    // 3️⃣ Sinon, ou si Serper n'a rien donné, on reste sur le comportement normal
+    if (!answer) {
+      const fullHistory = getConversationHistory(uid);
+      answer = await askOpenAIText(fullHistory);
+    }
+
+    // 4️⃣ On stocke la réponse et on renvoie
     pushToConversation(uid, "assistant", answer);
 
     res.json({ answer, tokensLeft: tokens });
@@ -261,79 +395,7 @@ app.post("/analyze-image", upload.single("image"), async (req, res) => {
 });
 
 // ------------------------------------------------------------
-// LECTURE CODE-BARRES → OpenFoodFacts
-// ------------------------------------------------------------
-app.get("/barcode", async (req, res) => {
-  try {
-    const code = (req.query.code || "").trim();
-    if (!code) {
-      return res.status(400).json({ error: "Aucun code-barres fourni." });
-    }
-
-    const url = `https://world.openfoodfacts.org/api/v0/product/${code}.json`;
-    const resp = await fetch(url);
-
-    if (!resp.ok) {
-      console.error("OpenFoodFacts status:", resp.status);
-      return res.status(500).json({ error: "Erreur OpenFoodFacts." });
-    }
-
-    const data = await resp.json();
-
-    if (data.status !== 1 || !data.product) {
-      return res.json({
-        found: false,
-        code,
-        message: "Produit introuvable dans OpenFoodFacts.",
-      });
-    }
-
-    const p = data.product;
-
-    res.json({
-      found: true,
-      code,
-      name: p.product_name || null,
-      brand: p.brands || null,
-      quantity: p.quantity || null,
-      nutriscore: p.nutrition_grade_fr || p.nutriscore_grade || null,
-      nova: p.nova_group || null,
-      eco_score: p.ecoscore_grade || null,
-      image: p.image_front_small_url || p.image_url || null,
-    });
-  } catch (err) {
-    console.error("🔥 Erreur /barcode:", err);
-    res.status(500).json({ error: "Erreur interne /barcode." });
-  }
-});
-
-// ------------------------------------------------------------
-// CONFIG PUBLIQUE POUR LE FRONT (PayPal + crédits gratuits)
-// ------------------------------------------------------------
-app.get("/config", (_req, res) => {
-  const paymentsEnabled = envTrue(PAYMENT_ENABLED) || envTrue(PAYMENTS_ENABLED);
-  const paypalClientId = (PAYPAL_CLIENT_ID || "").trim().replace(/\s+/g, "");
-  const mode = (PAYPAL_MODE || "sandbox").trim();
-
-  const freeAnon = Number(FREE_ANON) || 0;
-  const freeAfterSignup = Number(FREE_AFTER_SIGNUP) || 0;
-
-  res.set({
-    "Cache-Control": "no-store, max-age=0",
-    Pragma: "no-cache",
-    Expires: "0",
-  });
-
-  res.json({
-    paymentsEnabled,
-    paypalClientId,
-    mode,
-    freeAnon,
-    freeAfterSignup,
-  });
-});
-// ------------------------------------------------------------
-// LECTURE CODE-BARRES -> OpenFoodFacts
+// LECTURE CODE-BARRES -> OpenFoodFacts (version v2 propre)
 // ------------------------------------------------------------
 app.get("/barcode", async (req, res) => {
   try {
@@ -393,11 +455,38 @@ app.get("/barcode", async (req, res) => {
     });
   }
 });
+
+// ------------------------------------------------------------
+// CONFIG PUBLIQUE POUR LE FRONT (PayPal + crédits gratuits)
+// ------------------------------------------------------------
+app.get("/config", (_req, res) => {
+  const paymentsEnabled = envTrue(PAYMENT_ENABLED) || envTrue(PAYMENTS_ENABLED);
+  const paypalClientId = (PAYPAL_CLIENT_ID || "").trim().replace(/\s+/g, "");
+  const mode = (PAYPAL_MODE || "sandbox").trim();
+
+  const freeAnon = Number(FREE_ANON) || 0;
+  const freeAfterSignup = Number(FREE_AFTER_SIGNUP) || 0;
+
+  res.set({
+    "Cache-Control": "no-store, max-age=0",
+    Pragma: "no-cache",
+    Expires: "0",
+  });
+
+  res.json({
+    paymentsEnabled,
+    paypalClientId,
+    mode,
+    freeAnon,
+    freeAfterSignup,
+  });
+});
+
 // ------------------------------------------------------------
 // HEALTHCHECK
 // ------------------------------------------------------------
 app.get("/", (_req, res) => {
-  res.send("✅ API Philomène I.A. en ligne (GPT-4o, mémoire, tokens).");
+  res.send("✅ API Philomène I.A. en ligne (GPT-4o, mémoire, tokens, actu Serper).");
 });
 
 // ------------------------------------------------------------
