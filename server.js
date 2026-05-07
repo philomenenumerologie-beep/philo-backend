@@ -1,502 +1,372 @@
 // server.js
-// Backend Philomène I.A.
-// - /ask           : conversation texte (gpt-4o-mini, fallback gpt-4o)
-// - /analyze-image : analyse d'image (gpt-4o)
-// - /barcode       : infos produit + NutriScore via OpenFoodFacts
-// - /config        : infos publiques paiement + crédits gratuits
-// - mémoire de conversation en RAM
-// ------------------------------------------------------------
+// Backend Philomène I.A. + Coach IA
+// - /ask        : Philomène (conversation générale)
+// - /coach      : Coach IA (assistant football)
+// - /analyze-image : analyse d’image
+// - /config     : infos publiques
+// - Système de clés club avec limite d’appareils
 
-import express from "express";
-import cors from "cors";
-import fetch from "node-fetch";
-import multer from "multer";
+import express from “express”;
+import cors from “cors”;
+import fetch from “node-fetch”;
+import multer from “multer”;
 
-// (optionnel, utile en local)
-try {
-  const dotenv = await import("dotenv");
-  dotenv.default.config();
-} catch {}
+try { await import(“dotenv”).then(m => m.default.config()); } catch {}
 
-// ------------------------------------------------------------
-// App & middlewares
-// ------------------------------------------------------------
 const app = express();
-app.set("trust proxy", true);
-
-// Limites d’upload / JSON
-app.use(express.json({ limit: "15mb" }));
+app.set(“trust proxy”, true);
+app.use(express.json({ limit: “15mb” }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORS : autorise ton site
 const corsOpts = {
-  origin: ["https://philomeneia.com", "https://www.philomeneia.com"],
-  methods: ["POST", "GET", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+origin: “*”,
+methods: [“POST”, “GET”, “OPTIONS”],
+allowedHeaders: [“Content-Type”, “Authorization”],
 };
 app.use(cors(corsOpts));
-app.options("*", cors(corsOpts));
+app.options(”*”, cors(corsOpts));
 
-// Multer pour les images
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+storage: multer.memoryStorage(),
+limits: { fileSize: 10 * 1024 * 1024 },
 });
 
-// ------------------------------------------------------------
+// ============================================================
 // CONFIG ENV
-// ------------------------------------------------------------
+// ============================================================
 const {
-  OPENAI_API_KEY = "",
-  OPENAI_MODEL_TEXT = "gpt-4o-mini",
-  OPENAI_MODEL_VISION = "gpt-4o",
-
-  // ➜ crédits gratuits (expo dans /config)
-  FREE_ANON = "2000",
-  FREE_AFTER_SIGNUP = "3000",
-
-  // Paiement
-  PAYMENT_ENABLED,
-  PAYMENTS_ENABLED,
-  PAYPAL_CLIENT_ID = "",
-  PAYPAL_MODE = "sandbox",
+OPENAI_API_KEY = “”,
+OPENAI_MODEL_TEXT = “gpt-4o-mini”,
+OPENAI_MODEL_VISION = “gpt-4o”,
+FREE_ANON = “2000”,
+FREE_AFTER_SIGNUP = “3000”,
+PAYMENT_ENABLED,
+PAYMENTS_ENABLED,
+PAYPAL_CLIENT_ID = “”,
+PAYPAL_MODE = “sandbox”,
 } = process.env;
 
-// Clé Serper (actu en direct)
-const SERPER_API_KEY = process.env.SERPER_API_KEY || "";
-
-const envTrue = (v) => String(v ?? "").trim().toLowerCase() === "true";
+const envTrue = (v) => String(v ?? “”).trim().toLowerCase() === “true”;
 
 if (!OPENAI_API_KEY) {
-  console.warn("⚠️  OPENAI_API_KEY manquant. Mets-le dans Render → Environment.");
+console.warn(“⚠️  OPENAI_API_KEY manquant.”);
 }
 
-if (!SERPER_API_KEY) {
-  console.warn("ℹ️ SERPER_API_KEY absent : la recherche d’actualité est désactivée.");
+// ============================================================
+// CLUBS — Système de clés
+// ============================================================
+// Pour ajouter un club : ajoute une entrée ici
+// Pour couper un club  : mets active: false
+// maxUsers             : nombre max d’appareils autorisés
+// ============================================================
+const CLUBS = {
+“DEMO-CLUB-0000”: {
+nom: “Club Démo”,
+maxUsers: 3,
+active: true,
+},
+// Ajoute tes vrais clubs ici :
+// “FC-TOURCOING-X7K2”: { nom: “FC Tourcoing”, maxUsers: 10, active: true },
+// “AS-MOUSCRON-A3B9”: { nom: “AS Mouscron”, maxUsers: 15, active: true },
+};
+
+// Stockage des appareils par clé (en RAM)
+// Structure : { “CLE”: Set([“deviceId1”, “deviceId2”, …]) }
+const clubDevices = {};
+
+function checkClubAccess(clubKey, deviceId) {
+const club = CLUBS[clubKey];
+
+if (!club) return { ok: false, reason: “Clé club invalide.” };
+if (!club.active) return { ok: false, reason: “Abonnement expiré. Contactez votre administrateur.” };
+
+if (!clubDevices[clubKey]) clubDevices[clubKey] = new Set();
+const devices = clubDevices[clubKey];
+
+// Appareil déjà enregistré → OK
+if (devices.has(deviceId)) return { ok: true, club };
+
+// Nouvel appareil → vérifier la limite
+if (devices.size >= club.maxUsers) {
+return {
+ok: false,
+reason: `Limite de ${club.maxUsers} utilisateurs atteinte pour ce club. Contactez votre administrateur.`,
+};
 }
 
-// ------------------------------------------------------------
-// MÉMOIRE DE CONVERSATION (RAM)
-// ------------------------------------------------------------
+// Nouvel appareil autorisé → on l’enregistre
+devices.add(deviceId);
+console.log(`✅ Nouvel appareil enregistré pour ${club.nom} (${devices.size}/${club.maxUsers})`);
+return { ok: true, club };
+}
+
+// ============================================================
+// MÉMOIRE DE CONVERSATION
+// ============================================================
 const conversations = {};
 
-function getConversationHistory(userId) {
-  if (!conversations[userId]) {
-    conversations[userId] = [
-      {
-        role: "system",
-        content:
-          "Tu es Philomène I.A., une assistante personnelle française. " +
-          "Réponds clairement, simplement, sans blabla inutile. " +
-          "Sois sympa et directe, avec des infos concrètes.",
-      },
-    ];
-  }
-  return conversations[userId];
+function getConversationHistory(userId, systemPrompt) {
+if (!conversations[userId]) {
+conversations[userId] = [{ role: “system”, content: systemPrompt }];
+}
+return conversations[userId];
 }
 
 function pushToConversation(userId, role, content) {
-  const history = getConversationHistory(userId);
-  history.push({ role, content });
-
-  const MAX_MESSAGES = 60;
-  if (history.length > MAX_MESSAGES) {
-    const systemMsg = history[0];
-    const lastMsgs = history.slice(-MAX_MESSAGES + 1);
-    conversations[userId] = [systemMsg, ...lastMsgs];
-  }
+const history = conversations[userId];
+if (!history) return;
+history.push({ role, content });
+const MAX = 60;
+if (history.length > MAX) {
+const sys = history[0];
+conversations[userId] = [sys, …history.slice(-MAX + 1)];
+}
 }
 
-// ------------------------------------------------------------
-// APPELS OPENAI - TEXTE
-// ------------------------------------------------------------
-async function askOpenAIText(messages) {
-  const body = { model: OPENAI_MODEL_TEXT, messages };
+// ============================================================
+// PROMPTS
+// ============================================================
+const PROMPT_PHILOMENE =
+“Tu es Philomène I.A., une assistante personnelle française. “ +
+“Réponds clairement, simplement, sans blabla inutile. “ +
+“Sois sympa et directe, avec des infos concrètes.”;
 
-  try {
-    // premier essai : modèle rapide (gpt-4o-mini)
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
+function getCoachPrompt(categorie) {
+return `Tu es Coach IA, un assistant personnel pour entraîneurs de football amateur.
+Catégorie active : ${categorie || “toutes catégories”}.
 
-    if (!resp.ok) throw new Error("Mini model failed");
+RÈGLES D’ADAPTATION PAR CATÉGORIE :
 
-    const data = await resp.json();
-    const answer = data?.choices?.[0]?.message?.content?.trim();
-    return answer || "Je n'ai pas pu générer de réponse.";
-  } catch (err) {
-    console.warn("⚠️ gpt-4o-mini indisponible, fallback vers gpt-4o :", err.message);
+- U6/U7 → jeux simples, plaisir, pas de tactique, courtes durées
+- U8/U9 → bases dribble, passe, petit terrain, exercices fun
+- U10/U11 → début tactique, positions, foot à 8, schémas simples
+- U12/U13 → tactique collective, pressing, transitions
+- U14/U15 → schémas tactiques, phases de jeu, physique
+- Seniors → tout niveau tactique et physique
 
-    // fallback vers GPT-4o complet
-    const fallbackBody = { ...body, model: "gpt-4o" };
+POUR CHAQUE SÉANCE TU FOURNIS :
 
-    try {
-      const retry = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(fallbackBody),
-      });
+1. Échauffement avec durée
+1. 2 ou 3 exercices principaux détaillés
+1. Match final
+1. Pour chaque exercice : nombre de joueurs, matériel nécessaire, durée, objectif, consignes simples à lire aux joueurs sur le terrain
 
-      const data = await retry.json();
-      return (
-        data?.choices?.[0]?.message?.content?.trim() ||
-        "Réponse générée avec le modèle complet."
-      );
-    } catch (err2) {
-      console.error("❌ Erreur fallback gpt-4o :", err2);
-      return "Je rencontre un problème technique pour répondre pour le moment.";
-    }
-  }
+FORMAT DES CONSIGNES :
+
+- Courtes et simples, en langage parlé
+- Maximum 4 lignes par exercice
+- Comme si tu parlais directement aux joueurs
+
+TU PEUX AUSSI :
+
+- Rédiger des messages WhatsApp pour les parents (convocations, infos match, annulations)
+- Donner des conseils en cas de blessure légère
+- Suggérer des exercices physiques adaptés à l’âge
+- Proposer des variantes si l’exercice est trop facile ou trop difficile
+
+TU NE RÉPONDS PAS aux questions sans rapport avec le football ou le coaching sportif.`;
 }
 
-// ------------------------------------------------------------
-// APPELS OPENAI - VISION
-// ------------------------------------------------------------
+// ============================================================
+// APPELS OPENAI
+// ============================================================
+async function askOpenAI(messages, model = OPENAI_MODEL_TEXT) {
+const resp = await fetch(“https://api.openai.com/v1/chat/completions”, {
+method: “POST”,
+headers: {
+Authorization: `Bearer ${OPENAI_API_KEY}`,
+“Content-Type”: “application/json”,
+},
+body: JSON.stringify({ model, messages }),
+});
+
+if (!resp.ok) {
+const err = await resp.text();
+throw new Error(`OpenAI error ${resp.status}: ${err}`);
+}
+
+const data = await resp.json();
+return data?.choices?.[0]?.message?.content?.trim() || “Pas de réponse.”;
+}
+
 async function askOpenAIVision({ question, dataUrl }) {
-  const messages = [
-    {
-      role: "system",
-      content:
-        "Tu es Philomène I.A., assistante française. Analyse l'image et explique clairement ce qu'il y a dessus. " +
-        "Si tu n'es pas sûre, dis-le honnêtement.",
-    },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: question || "Analyse l'image." },
-        { type: "image_url", image_url: { url: dataUrl } },
-      ],
-    },
-  ];
+const messages = [
+{
+role: “system”,
+content: “Tu es Philomène I.A., assistante française. Analyse l’image et explique clairement ce qu’il y a dessus.”,
+},
+{
+role: “user”,
+content: [
+{ type: “text”, text: question || “Analyse l’image.” },
+{ type: “image_url”, image_url: dataUrl },
+],
+},
+];
 
-  const body = { model: OPENAI_MODEL_VISION, messages };
+const resp = await fetch(“https://api.openai.com/v1/chat/completions”, {
+method: “POST”,
+headers: {
+Authorization: `Bearer ${OPENAI_API_KEY}`,
+“Content-Type”: “application/json”,
+},
+body: JSON.stringify({ model: OPENAI_MODEL_VISION, messages }),
+});
 
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    const textErr = await resp.text();
-    console.error("❌ OpenAI /vision status:", resp.status);
-    console.error("❌ OpenAI /vision body:", textErr);
-    throw new Error(`Erreur API OpenAI (vision) ${resp.status}`);
-  }
-
-  const data = await resp.json();
-  const answer = data?.choices?.[0]?.message?.content?.trim();
-  return answer || "Image reçue, mais impossible de l'analyser.";
+if (!resp.ok) throw new Error(`OpenAI vision error ${resp.status}`);
+const data = await resp.json();
+return data?.choices?.[0]?.message?.content?.trim() || “Impossible d’analyser.”;
 }
 
-// ------------------------------------------------------------
-// SERPER (ACTU EN DIRECT) – HELPERS
-// ------------------------------------------------------------
+// ============================================================
+// ROUTES
+// ============================================================
 
-// 1) Détecter si la question a besoin d’infos fraîches
-function needsFreshNews(question) {
-  const q = (question || "").toLowerCase();
+// — Philomène /ask —
+app.post(”/ask”, async (req, res) => {
+try {
+const { conversation, userId } = req.body || {};
+const uid = userId || “guest”;
 
-  const keywords = [
-    "aujourd'hui",
-    "en ce moment",
-    "en ce momment",
-    "actu",
-    "actualité",
-    "news",
-    "dernier",
-    "dernière",
-    "actuel",
-    "actuelle",
-    "qui est le président",
-    "qui est la présidente",
-    "qui est le premier ministre",
-    "qui est la première ministre",
-    "gouvernement",
-    "élection",
-    "election",
-    "guerre",
-    "conflit",
-    "score",
-    "résultat",
-    "résultats",
-    "2024",
-    "2025",
-    "2026",
-  ];
-
-  return keywords.some((k) => q.includes(k));
-}
-
-// 2) Appel Serper brut
-async function callSerperSearch(query) {
-  if (!SERPER_API_KEY) return null;
-
-  const body = {
-    q: query,
-    gl: "fr", // géo France
-    hl: "fr", // langue résultats
-    num: 5,
-  };
-
-  const resp = await fetch("https://google.serper.dev/search", {
-    method: "POST",
-    headers: {
-      "X-API-KEY": SERPER_API_KEY,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    console.error("❌ Serper status:", resp.status);
-    return null;
-  }
-
-  const data = await resp.json();
-  const organic = data.organic || [];
-  if (!organic.length) return null;
-
-  // On garde les 3 premiers résultats
-  const top = organic.slice(0, 3);
-  const summary = top
-    .map((r, idx) => {
-      const title = r.title || "";
-      const snippet = r.snippet || "";
-      const source = r.domain || r.link || "";
-      return `[${idx + 1}] ${title}\n${snippet}\n(source : ${source})`;
-    })
-    .join("\n\n");
-
-  return summary;
-}
-
-// 3) Essaie de répondre en utilisant Serper + OpenAI
-async function maybeAnswerWithNews(question) {
-  if (!needsFreshNews(question)) return null;
-  if (!SERPER_API_KEY) return null;
-
-  try {
-    const webSummary = await callSerperSearch(question);
-    if (!webSummary) return null;
-
-    const messages = [
-      {
-        role: "system",
-        content:
-          "Tu es Philomène I.A., une assistante française. " +
-          "Tu disposes d'informations d'actualité provenant d'Internet (Serper). " +
-          "Utilise-les pour répondre de manière à jour, claire et prudente. " +
-          "Si les infos ne sont pas claires ou se contredisent, dis-le.",
-      },
-      {
-        role: "user",
-        content:
-          `Question de l'utilisateur : ${question}\n\n` +
-          `Voici des informations récentes trouvées sur le web :\n` +
-          `${webSummary}\n\n` +
-          "Réponds en français, simplement, comme une assistante personnelle, " +
-          "en citant les éléments importants (dates, pays, rôle des personnes).",
-      },
-    ];
-
-    const answer = await askOpenAIText(messages);
-    return answer || null;
-  } catch (err) {
-    console.error("🔥 Erreur maybeAnswerWithNews:", err);
-    return null;
+```
+let lastUserMessage = null;
+if (Array.isArray(conversation)) {
+  for (let i = conversation.length - 1; i >= 0; i--) {
+    const msg = conversation[i];
+    if (msg.role === "user" && msg.content?.trim()) {
+      lastUserMessage = msg.content.trim();
+      break;
+    }
   }
 }
 
-// ------------------------------------------------------------
-// ROUTES IA
-// ------------------------------------------------------------
+if (!lastUserMessage) return res.status(400).json({ error: "Pas de message." });
 
-// Texte
-app.post("/ask", async (req, res) => {
-  try {
-    const { conversation, userId, tokens } = req.body || {};
-    const uid = userId || "guest";
+// Initialise la mémoire si besoin
+if (!conversations[uid]) {
+  conversations[uid] = [{ role: "system", content: PROMPT_PHILOMENE }];
+}
 
-    let lastUserMessage = null;
-    if (Array.isArray(conversation)) {
-      for (let i = conversation.length - 1; i >= 0; i--) {
-        const msg = conversation[i];
-        if (msg.role === "user" && msg.content && msg.content.trim()) {
-          lastUserMessage = msg.content.trim();
-          break;
-        }
-      }
-    }
+pushToConversation(uid, "user", lastUserMessage);
+const answer = await askOpenAI(conversations[uid]);
+pushToConversation(uid, "assistant", answer);
 
-    if (!lastUserMessage) {
-      return res.status(400).json({ error: "Pas de message utilisateur reçu." });
-    }
+res.json({ answer });
+```
 
-    // 1️⃣ On mémorise le message dans l'historique
-    pushToConversation(uid, "user", lastUserMessage);
-
-    // 2️⃣ Si c’est une question d'actualité -> on tente Serper d'abord
-    let answer = await maybeAnswerWithNews(lastUserMessage);
-
-    // 3️⃣ Sinon, ou si Serper n'a rien donné, on reste sur le comportement normal
-    if (!answer) {
-      const fullHistory = getConversationHistory(uid);
-      answer = await askOpenAIText(fullHistory);
-    }
-
-    // 4️⃣ On stocke la réponse et on renvoie
-    pushToConversation(uid, "assistant", answer);
-
-    res.json({ answer, tokensLeft: tokens });
-  } catch (err) {
-    console.error("🔥 Erreur /ask:", err);
-    res.status(500).json({ error: "Erreur interne /ask." });
-  }
+} catch (err) {
+console.error(“🔥 /ask:”, err);
+res.status(500).json({ error: “Erreur interne /ask.” });
+}
 });
 
-// Image
-app.post("/analyze-image", upload.single("image"), async (req, res) => {
-  try {
-    const uid = req.body?.userId || "guest";
-    const userPrompt =
-      req.body?.prompt || "Décris précisément l'image et à quoi elle sert.";
+// — Coach IA /coach —
+app.post(”/coach”, async (req, res) => {
+try {
+const { message, userId, categorie, clubKey, deviceId } = req.body || {};
 
-    if (!req.file) {
-      return res.status(400).json({ error: "Aucune image reçue." });
-    }
+```
+// Vérification clé club
+if (!clubKey || !deviceId) {
+  return res.status(401).json({ error: "Clé club ou identifiant appareil manquant." });
+}
 
-    const mimeType = req.file.mimetype || "image/jpeg";
-    const base64 = req.file.buffer.toString("base64");
-    const dataUrl = `data:${mimeType};base64,${base64}`;
+const access = checkClubAccess(clubKey, deviceId);
+if (!access.ok) {
+  return res.status(403).json({ error: access.reason });
+}
 
-    pushToConversation(uid, "user", `${userPrompt} [image envoyée]`);
+if (!message?.trim()) return res.status(400).json({ error: "Pas de message." });
 
-    const visionAnswer = await askOpenAIVision({ question: userPrompt, dataUrl });
+const uid = `coach_${userId || "guest"}`;
+const systemPrompt = getCoachPrompt(categorie);
 
-    pushToConversation(uid, "assistant", visionAnswer);
+if (!conversations[uid]) {
+  conversations[uid] = [{ role: "system", content: systemPrompt }];
+}
 
-    res.json({ answer: visionAnswer });
-  } catch (err) {
-    console.error("🔥 Erreur /analyze-image:", err);
-    res.status(500).json({ error: "Erreur interne /analyze-image." });
-  }
+// Mise à jour de la catégorie si elle change
+conversations[uid][0] = { role: "system", content: systemPrompt };
+
+pushToConversation(uid, "user", message.trim());
+const answer = await askOpenAI(conversations[uid]);
+pushToConversation(uid, "assistant", answer);
+
+res.json({ answer, club: access.club.nom });
+```
+
+} catch (err) {
+console.error(“🔥 /coach:”, err);
+res.status(500).json({ error: “Erreur interne /coach.” });
+}
 });
 
-// ------------------------------------------------------------
-// LECTURE CODE-BARRES -> OpenFoodFacts (version v2 propre)
-// ------------------------------------------------------------
-app.get("/barcode", async (req, res) => {
-  try {
-    const code = (req.query.code || "").trim();
+// — Analyse image /analyze-image —
+app.post(”/analyze-image”, upload.single(“image”), async (req, res) => {
+try {
+const uid = req.body?.userId || “guest”;
+const userPrompt = req.body?.prompt || “Décris l’image.”;
 
-    if (!code) {
-      return res.status(400).json({
-        found: false,
-        error: "Aucun code fourni.",
-      });
-    }
+```
+if (!req.file) return res.status(400).json({ error: "Aucune image." });
 
-    const url = `https://world.openfoodfacts.org/api/v2/product/${code}.json`;
-    const resp = await fetch(url);
+const base64 = req.file.buffer.toString("base64");
+const dataUrl = `data:${req.file.mimetype};base64,${base64}`;
 
-    if (!resp.ok) {
-      console.error("OpenFoodFacts HTTP:", resp.status);
-      return res.status(502).json({
-        found: false,
-        code,
-        error: "Erreur OpenFoodFacts.",
-      });
-    }
+pushToConversation(uid, "user", `${userPrompt} [image]`);
+const answer = await askOpenAIVision({ question: userPrompt, dataUrl });
+pushToConversation(uid, "assistant", answer);
 
-    const data = await resp.json();
+res.json({ answer });
+```
 
-    if (!data || data.status !== 1 || !data.product) {
-      return res.json({
-        found: false,
-        code,
-        message: "Produit introuvable dans la base.",
-      });
-    }
-
-    const p = data.product;
-
-    res.json({
-      found: true,
-      code,
-      name: p.product_name || p.generic_name || "",
-      brand: p.brands || "",
-      quantity: p.quantity || "",
-      nutriscore: p.nutriscore_grade || null,
-      nova: p.nova_group || null,
-      eco_score: p.ecoscore_grade || null,
-      image:
-        p.image_front_small_url ||
-        p.image_front_url ||
-        p.image_url ||
-        null,
-    });
-  } catch (err) {
-    console.error("🔥 Erreur /barcode:", err);
-    res.status(500).json({
-      found: false,
-      error: "Erreur serveur /barcode.",
-    });
-  }
+} catch (err) {
+console.error(“🔥 /analyze-image:”, err);
+res.status(500).json({ error: “Erreur /analyze-image.” });
+}
 });
 
-// ------------------------------------------------------------
-// CONFIG PUBLIQUE POUR LE FRONT (PayPal + crédits gratuits)
-// ------------------------------------------------------------
-app.get("/config", (_req, res) => {
-  const paymentsEnabled = envTrue(PAYMENT_ENABLED) || envTrue(PAYMENTS_ENABLED);
-  const paypalClientId = (PAYPAL_CLIENT_ID || "").trim().replace(/\s+/g, "");
-  const mode = (PAYPAL_MODE || "sandbox").trim();
-
-  const freeAnon = Number(FREE_ANON) || 0;
-  const freeAfterSignup = Number(FREE_AFTER_SIGNUP) || 0;
-
-  res.set({
-    "Cache-Control": "no-store, max-age=0",
-    Pragma: "no-cache",
-    Expires: "0",
-  });
-
-  res.json({
-    paymentsEnabled,
-    paypalClientId,
-    mode,
-    freeAnon,
-    freeAfterSignup,
-  });
+// — Config publique /config —
+app.get(”/config”, (_req, res) => {
+res.set({ “Cache-Control”: “no-store” });
+res.json({
+paymentsEnabled: envTrue(PAYMENT_ENABLED) || envTrue(PAYMENTS_ENABLED),
+paypalClientId: (PAYPAL_CLIENT_ID || “”).trim(),
+mode: (PAYPAL_MODE || “sandbox”).trim(),
+freeAnon: Number(FREE_ANON) || 0,
+freeAfterSignup: Number(FREE_AFTER_SIGNUP) || 0,
+});
 });
 
-// ------------------------------------------------------------
-// HEALTHCHECK
-// ------------------------------------------------------------
-app.get("/", (_req, res) => {
-  res.send("✅ API Philomène I.A. en ligne (GPT-4o, mémoire, tokens, actu Serper).");
+// — Admin : voir les clubs actifs (protégé par clé admin) —
+app.get(”/admin/clubs”, (req, res) => {
+const adminKey = req.headers[“x-admin-key”];
+if (adminKey !== process.env.ADMIN_KEY) {
+return res.status(403).json({ error: “Accès refusé.” });
+}
+const stats = {};
+for (const [key, club] of Object.entries(CLUBS)) {
+stats[key] = {
+nom: club.nom,
+maxUsers: club.maxUsers,
+active: club.active,
+currentUsers: clubDevices[key]?.size || 0,
+};
+}
+res.json(stats);
 });
 
-// ------------------------------------------------------------
-// LANCEMENT SERVEUR
-// ------------------------------------------------------------
+// — Healthcheck —
+app.get(”/”, (_req, res) => {
+res.send(“✅ API Philomène I.A. + Coach IA en ligne.”);
+});
+
+// ============================================================
+// LANCEMENT
+// ============================================================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log("🚀 Philomène backend démarré sur le port " + PORT);
-  console.log("🧠 Models:", {
-    text: OPENAI_MODEL_TEXT,
-    vision: OPENAI_MODEL_VISION,
-  });
+console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+console.log(`⚽ Coach IA actif — ${Object.keys(CLUBS).length} club(s) configuré(s)`);
+console.log(`🧠 Models: text=${OPENAI_MODEL_TEXT} vision=${OPENAI_MODEL_VISION}`);
 });
