@@ -193,14 +193,18 @@ app.post("/coach", async (req, res) => {
     const rawAnswer = await askOpenAI(conversations[uid]);
     let answer = rawAnswer;
     let schema = null;
-    const schemaMatch = rawAnswer.match(/###SCHEMA_START###([\s\S]*?)###SCHEMA_END###/);
-    if (schemaMatch) {
-      try {
-        schema = JSON.parse(schemaMatch[1].trim());
-        answer = rawAnswer.replace(/###SCHEMA_START###[\s\S]*?###SCHEMA_END###/, "").trim();
-      } catch (e) {
-        console.warn("Schema JSON invalide:", e);
-      }
+    const schemaMatch = rawAnswer.match(/###SCHEMA_START###[\s\S]*?(\{[\s\S]*?\})[\s\S]*?###SCHEMA_END###/);
+if (schemaMatch) {
+  try {
+    schema = JSON.parse(schemaMatch[1].trim());
+    answer = rawAnswer.replace(/```json[\s\S]*?```/g, "").replace(/###SCHEMA_START###[\s\S]*?###SCHEMA_END###/g, "").trim();
+  } catch (e) {
+    answer = rawAnswer.replace(/```json[\s\S]*?```/g, "").replace(/###SCHEMA_START###[\s\S]*?###SCHEMA_END###/g, "").trim();
+    console.warn("Schema JSON invalide:", e);
+  }
+}
+
+    
     }
     pushToConversation(uid, "assistant", answer);
     res.json({ answer, schema, club: access.club.nom });
