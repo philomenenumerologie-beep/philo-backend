@@ -1,5 +1,6 @@
 // server.js
 // Backend Philomene I.A. + Coach IA
+// Deux appels OpenAI separes : texte + schema
 
 import express from "express";
 import cors from "cors";
@@ -74,36 +75,32 @@ function pushToConversation(userId, role, content) {
   }
 }
 
-function getCoachPrompt(categorie) {
+function getCoachTextPrompt(categorie) {
   const cat = categorie || "toutes categories";
-  let prompt = "Tu es Coach IA, un assistant pour entraineurs de football amateur. ";
-  prompt += "Categorie active : " + cat + ". ";
-  prompt += "U6/U7: jeux simples, plaisir. ";
-  prompt += "U8/U9: dribble, passe, petit terrain. ";
-  prompt += "U10/U11: tactique, foot a 8. ";
-  prompt += "U12/U13: pressing, transitions. ";
-  prompt += "U14/U15: schemas tactiques. ";
-  prompt += "U16/U17 et U18: niveau avance. ";
-  prompt += "Seniors: tout niveau. ";
-  prompt += "Pour chaque seance : echauffement, 2-3 exercices, match final. ";
-  prompt += "Pour chaque exercice : joueurs, materiel, duree, objectif, consignes simples. ";
-  prompt += "A la fin de chaque reponse avec exercices, ajoute un JSON entre ###SCHEMA_START### et ###SCHEMA_END###. ";
-  prompt += "Format JSON : {";
-  prompt += '"type":"triangle",';
-  prompt += '"players":[{"id":"J1","x":50,"y":20},{"id":"J2","x":20,"y":70},{"id":"J3","x":80,"y":70}],';
-  prompt += '"plots":[{"x":50,"y":20},{"x":20,"y":70},{"x":80,"y":70}],';
-  prompt += '"ball_paths":[{"from":"J1","to":"J2","style":"dashed"}],';
-  prompt += '"player_paths":[{"from":"J2","to":"J3","style":"solid"}],';
-  prompt += '"goal":null,';
-  prompt += '"distance":"7m entre les plots",';
-  prompt += '"description":"Triangle de passes"';
-  prompt += "}. ";
-  prompt += "Adapte le JSON selon le vrai exercice. ";
-  prompt += "Types: triangle, slalom, carre, ligne, rondo, dribble_but. ";
-  prompt += "Coordonnees x et y en pourcentage 0-100. ";
-  prompt += "Pour dribble_but: ajoute goal:{x:50,y:5}. ";
-  prompt += "Ne reponds pas aux questions sans rapport avec le football.";
-  return prompt;
+  let p = "Tu es Coach IA, un assistant pour entraineurs de football amateur. ";
+  p += "Categorie : " + cat + ". ";
+  p += "U6/U7: jeux simples. U8/U9: dribble passe. U10/U11: tactique foot a 8. ";
+  p += "U12/U13: pressing. U14/U15: schemas. U16-U18: niveau avance. Seniors: tout. ";
+  p += "Pour chaque seance : echauffement, 2-3 exercices detailles, match final. ";
+  p += "Pour chaque exercice : joueurs, materiel, duree, objectif, consignes simples. ";
+  p += "Reponds UNIQUEMENT avec le texte de la seance. Pas de JSON, pas de code.";
+  return p;
+}
+
+function getSchemaPrompt(exerciceText) {
+  let p = "Tu es un assistant qui genere uniquement du JSON pour des schemas d'exercices de football. ";
+  p += "Voici un exercice : " + exerciceText + ". ";
+  p += "Genere un JSON valide avec ce format exact : ";
+  p += '{"type":"triangle","players":[{"id":"J1","x":50,"y":20},{"id":"J2","x":20,"y":70},{"id":"J3","x":80,"y":70}],';
+  p += '"plots":[{"x":50,"y":20},{"x":20,"y":70},{"x":80,"y":70}],';
+  p += '"ball_paths":[{"from":"J1","to":"J2","style":"dashed"}],';
+  p += '"player_paths":[{"from":"J2","to":"J3","style":"solid"}],';
+  p += '"goal":null,"distance":"7m entre les plots","description":"Description courte"}. ';
+  p += "Types possibles : triangle, slalom, carre, ligne, rondo, dribble_but. ";
+  p += "Pour dribble_but ajoute goal:{x:50,y:5}. ";
+  p += "Coordonnees x et y entre 15 et 85. Joueurs bien espaces. ";
+  p += "Reponds UNIQUEMENT avec le JSON, rien d'autre.";
+  return p;
 }
 async function askOpenAI(messages) {
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -141,6 +138,30 @@ async function askOpenAIVision(question, dataUrl) {
   if (!resp.ok) throw new Error("Erreur OpenAI vision");
   const data = await resp.json();
   return data.choices[0].message.content.trim() || "Impossible d'analyser.";
+}
+
+async function generateSchema(exerciceText) {
+  try {
+    const messages = [
+      { role: "user", content: getSchemaPrompt(exerciceText) }
+    ];
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + OPENAI_API_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ model: OPENAI_MODEL_TEXT, messages, temperature: 0.2 })
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const raw = data.choices[0].message.content.trim();
+    const clean = raw.replace(/```json/g, "").replace(/```/g, "").trim();
+    return JSON.parse(clean);
+  } catch (e) {
+    console.warn("Schema generation failed:", e);
+    return null;
+  }
 }
 app.post("/ask", async (req, res) => {
   try {
@@ -183,32 +204,22 @@ app.post("/coach", async (req, res) => {
       return res.status(400).json({ error: "Pas de message." });
     }
     const uid = "coach_" + (userId || "guest");
-    const systemPrompt = getCoachPrompt(categorie);
+    const systemPrompt = getCoachTextPrompt(categorie);
     if (!conversations[uid]) {
       conversations[uid] = [{ role: "system", content: systemPrompt }];
     } else {
       conversations[uid][0] = { role: "system", content: systemPrompt };
     }
     pushToConversation(uid, "user", message.trim());
-    const rawAnswer = await askOpenAI(conversations[uid]);
-    let answer = rawAnswer.replace(/###\s*JSON[^\n]*\n/g, "").replace(/```json/g, "").replace(/```/g, "");
-
-    let schema = null;
-    const schemaMatch = rawAnswer.match(/###SCHEMA_START###\s*`*\s*(\{[\s\S]*?\})\s*`*\s*###SCHEMA_END###/);
-
-if (schemaMatch) {
-  try {
-    schema = JSON.parse(schemaMatch[1].trim());
-    answer = rawAnswer.replace(/```json[\s\S]*?```/g, "").replace(/###SCHEMA_START###[\s\S]*?###SCHEMA_END###/g, "").trim();
-  } catch (e) {
-    answer = rawAnswer.replace(/```json[\s\S]*?```/g, "").replace(/###SCHEMA_START###[\s\S]*?###SCHEMA_END###/g, "").trim();
-    console.warn("Schema JSON invalide:", e);
-  }
-}
-
-    
-    }
+    const answer = await askOpenAI(conversations[uid]);
     pushToConversation(uid, "assistant", answer);
+    const hasExercise = answer.toLowerCase().includes("exercice") ||
+      answer.toLowerCase().includes("echauffement") ||
+      answer.toLowerCase().includes("seance");
+    let schema = null;
+    if (hasExercise) {
+      schema = await generateSchema(answer);
+    }
     res.json({ answer, schema, club: access.club.nom });
   } catch (err) {
     console.error("Erreur /coach:", err);
