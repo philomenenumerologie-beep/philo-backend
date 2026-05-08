@@ -191,9 +191,11 @@ app.post("/coach", async (req, res) => {
     }
     pushToConversation(uid, "user", message.trim());
     const rawAnswer = await askOpenAI(conversations[uid]);
-    let answer = rawAnswer;
+    let answer = rawAnswer.replace(/###\s*JSON[^\n]*\n/g, "").replace(/```json/g, "").replace(/```/g, "");
+
     let schema = null;
-    const schemaMatch = rawAnswer.match(/###SCHEMA_START###[\s\S]*?(\{[\s\S]*?\})[\s\S]*?###SCHEMA_END###/);
+    const schemaMatch = rawAnswer.match(/###SCHEMA_START###\s*`*\s*(\{[\s\S]*?\})\s*`*\s*###SCHEMA_END###/);
+
 if (schemaMatch) {
   try {
     schema = JSON.parse(schemaMatch[1].trim());
