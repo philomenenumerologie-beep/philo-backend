@@ -243,6 +243,23 @@ app.post("/analyze-image", upload.single("image"), async (req, res) => {
     res.status(500).json({ error: "Erreur interne." });
   }
 });
+app.post("/sms", express.urlencoded({ extended: false }), async (req, res) => {
+  const from = req.body.From || "inconnu";
+  const body = req.body.Body || "";
+  
+  if (!body.trim()) {
+    return res.set("Content-Type", "text/xml").send(`<Response></Response>`);
+  }
+
+  pushToConversation(from, "user", body);
+  const history = getConversationHistory(from);
+  const answer = await askOpenAI(history);
+  pushToConversation(from, "assistant", answer);
+
+  res.set("Content-Type", "text/xml").send(`
+    <Response><Message>${answer}</Message></Response>
+  `);
+});
 
 app.get("/config", (_req, res) => {
   res.set({ "Cache-Control": "no-store" });
