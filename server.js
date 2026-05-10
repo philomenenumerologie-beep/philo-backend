@@ -190,6 +190,49 @@ app.post("/ask", async (req, res) => {
     res.status(500).json({ error: "Erreur interne /ask." });
   }
 });
+function getPrepaPrompt(categorie) {
+  const cat = categorie || "toutes categories";
+  let p = "Tu es un assistant preparateur physique de football. ";
+  p += "Categorie : " + cat + ". ";
+  p += "Tu analyses les resultats de tests physiques : test bip, Mini Cooper, vitesse, détente. ";
+  p += "Tu generes des tableaux clairs avec noms, resultats, niveaux. ";
+  p += "Tu crees des programmes personnalises selon les resultats. ";
+  p += "Tu fais des rapports clairs pour le staff. ";
+  p += "Format tes reponses proprement sans ** ni ### ni tirets markdown. ";
+  p += "Utilise des tableaux simples avec | pour les colonnes. ";
+  p += "Reponds UNIQUEMENT sur la preparation physique football.";
+  return p;
+}
+
+app.post("/prepa", async (req, res) => {
+  try {
+    const { message, userId, categorie, clubKey, deviceId } = req.body || {};
+    if (!clubKey || !deviceId) {
+      return res.status(401).json({ error: "Cle club manquante." });
+    }
+    const access = checkClubAccess(clubKey, deviceId);
+    if (!access.ok) {
+      return res.status(403).json({ error: access.reason });
+    }
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "Pas de message." });
+    }
+    const uid = "prepa_" + (userId || "guest");
+    const systemPrompt = getPrepaPrompt(categorie);
+    if (!conversations[uid]) {
+      conversations[uid] = [{ role: "system", content: systemPrompt }];
+    } else {
+      conversations[uid][0] = { role: "system", content: systemPrompt };
+    }
+    pushToConversation(uid, "user", message.trim());
+    const answer = await askOpenAI(conversations[uid]);
+    pushToConversation(uid, "assistant", answer);
+    res.json({ answer, club: access.club.nom });
+  } catch (err) {
+    console.error("Erreur /prepa:", err);
+    res.status(500).json({ error: "Erreur interne /prepa." });
+  }
+});
 
 app.post("/coach", async (req, res) => {
   try {
