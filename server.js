@@ -31,7 +31,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 const CLUBS = {
   "DEMO-CLUB-0000": { nom: "Club Demo", maxUsers: 3, active: true },
-  "RT-MOUSCRON-2026": { nom: "Risquons-Tout Mouscron", maxUsers: 10, active: true },
+  "RT-MOUSCRON-2026": { nom: "Risquons-Tout Mouscron", maxUsers: 20, active: true },
 };
 
 const clubDevices = {};
