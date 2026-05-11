@@ -282,6 +282,26 @@ app.post("/analyze-image", upload.single("image"), async (req, res) => {
     res.status(500).json({ error: "Erreur interne." });
   }
 });
+app.post("/maka", async (req, res) => {
+  try {
+    const { message, userId, systemPrompt } = req.body || {};
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "Pas de message." });
+    }
+    const uid = "maka_" + (userId || "guest");
+    if (!conversations[uid]) {
+      conversations[uid] = [{ role: "system", content: systemPrompt || "Tu es l'assistante de Maka Tattoo." }];
+    }
+    pushToConversation(uid, "user", message.trim());
+    const answer = await askOpenAI(conversations[uid]);
+    pushToConversation(uid, "assistant", answer);
+    res.json({ answer });
+  } catch (err) {
+    console.error("Erreur /maka:", err);
+    res.status(500).json({ error: "Erreur interne /maka." });
+  }
+});
+
 
 app.get("/config", (_req, res) => {
   res.set({ "Cache-Control": "no-store" });
