@@ -301,6 +301,25 @@ app.post("/maka", async (req, res) => {
     res.status(500).json({ error: "Erreur interne /maka." });
   }
 });
+app.post("/vitrine", async (req, res) => {
+  try {
+    const { message, userId, systemPrompt } = req.body || {};
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "Pas de message." });
+    }
+    const uid = "vitrine_" + (userId || "guest");
+    if (!conversations[uid]) {
+      conversations[uid] = [{ role: "system", content: systemPrompt || "Tu es Philomene IA." }];
+    }
+    pushToConversation(uid, "user", message.trim());
+    const answer = await askOpenAI(conversations[uid]);
+    pushToConversation(uid, "assistant", answer);
+    res.json({ answer });
+  } catch (err) {
+    console.error("Erreur /vitrine:", err);
+    res.status(500).json({ error: "Erreur interne /vitrine." });
+  }
+});
 
 
 app.get("/config", (_req, res) => {
