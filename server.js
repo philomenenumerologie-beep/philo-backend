@@ -40,6 +40,8 @@ function checkClubAccess(clubKey, deviceId) {
   const club = CLUBS[clubKey];
   if (!club) return { ok: false, reason: "Cle club invalide." };
   if (!club.active) return { ok: false, reason: "Abonnement expire." };
+  if (clubKey === "DEMO-CLUB-0000") return { ok: true, club };
+
   if (!clubDevices[clubKey]) clubDevices[clubKey] = new Set();
   const devices = clubDevices[clubKey];
   if (devices.has(deviceId)) return { ok: true, club };
