@@ -322,7 +322,55 @@ app.post("/vitrine", async (req, res) => {
     res.status(500).json({ error: "Erreur interne /vitrine." });
   }
 });
+// ================================================
+// COLLER CE CODE DANS SERVER.JS
+// Juste avant la ligne : app.get(”/”, …)
+// ================================================
 
+// Stockage des flashs en mémoire
+// (ils restent tant que le serveur tourne)
+let makaFlashs = [];
+let flashIdCounter = 1;
+
+// Route GET - récupérer tous les flashs (utilisée par l’app cliente)
+app.get(”/maka/flashs”, (req, res) => {
+res.json({ flashs: makaFlashs });
+});
+
+// Route POST - ajouter ou supprimer un flash (utilisée par la page admin)
+app.post(”/maka/flashs”, (req, res) => {
+try {
+const { action, nom, prix, image, id } = req.body || {};
+
+```
+if (action === "add") {
+  if (!nom || !prix || !image) {
+    return res.status(400).json({ ok: false, error: "Données manquantes" });
+  }
+  const flash = {
+    id: flashIdCounter++,
+    nom: nom,
+    prix: prix,
+    image: image // base64 de la photo
+  };
+  makaFlashs.push(flash);
+  return res.json({ ok: true, flash, count: makaFlashs.length });
+}
+
+if (action === "delete") {
+  const before = makaFlashs.length;
+  makaFlashs = makaFlashs.filter(f => f.id !== Number(id));
+  return res.json({ ok: true, deleted: before - makaFlashs.length });
+}
+
+return res.status(400).json({ ok: false, error: "Action inconnue" });
+```
+
+} catch (err) {
+console.error(“Erreur /maka/flashs:”, err);
+res.status(500).json({ ok: false, error: “Erreur interne” });
+}
+});
 
 app.get("/config", (_req, res) => {
   res.set({ "Cache-Control": "no-store" });
