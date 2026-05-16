@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import multer from "multer";
+import fs from "fs";
 
 const app = express();
 
@@ -28,7 +29,6 @@ app.use(cors({
 
 app.use(express.json({ limit: "10mb" }));
 const upload = multer({ storage: multer.memoryStorage() });
-
 const CLUBS = {
   "DEMO-CLUB-0000": { nom: "Club Demo", maxUsers: 999999, active: true },
   "RT-MOUSCRON-2026": { nom: "Risquons-Tout Mouscron", maxUsers: 20, active: true },
@@ -51,6 +51,7 @@ function checkClubAccess(clubKey, deviceId) {
   devices.add(deviceId);
   return { ok: true, club };
 }
+
 const conversations = {};
 
 function getConversationHistory(userId) {
@@ -73,7 +74,6 @@ function pushToConversation(userId, role, content) {
     conversations[userId] = [sys, ...last];
   }
 }
-
 function getCoachTextPrompt(categorie) {
   const cat = categorie || "toutes categories";
   let p = "Tu es Coach IA, un assistant pour entraineurs de football amateur. ";
@@ -113,6 +113,7 @@ function getPrepaPrompt() {
   p += "Reponds UNIQUEMENT sur la preparation physique football.";
   return p;
 }
+
 async function askOpenAI(messages) {
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -153,9 +154,7 @@ async function askOpenAIVision(question, dataUrl) {
 
 async function generateSchema(exerciceText) {
   try {
-    const messages = [
-      { role: "user", content: getSchemaPrompt(exerciceText) }
-    ];
+    const messages = [{ role: "user", content: getSchemaPrompt(exerciceText) }];
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -230,6 +229,7 @@ app.post("/prepa", async (req, res) => {
     res.status(500).json({ error: "Erreur interne /prepa." });
   }
 });
+
 app.post("/coach", async (req, res) => {
   try {
     const { message, userId, categorie, clubKey, deviceId } = req.body || {};
@@ -284,6 +284,7 @@ app.post("/analyze-image", upload.single("image"), async (req, res) => {
     res.status(500).json({ error: "Erreur interne." });
   }
 });
+
 app.post("/maka", async (req, res) => {
   try {
     const { message, userId, systemPrompt } = req.body || {};
@@ -303,6 +304,7 @@ app.post("/maka", async (req, res) => {
     res.status(500).json({ error: "Erreur interne /maka." });
   }
 });
+
 app.post("/vitrine", async (req, res) => {
   try {
     const { message, userId, systemPrompt } = req.body || {};
@@ -322,8 +324,58 @@ app.post("/vitrine", async (req, res) => {
     res.status(500).json({ error: "Erreur interne /vitrine." });
   }
 });
+const MEMORY_FILE = "./memory.json";
 
+function readMemory() {
+  try {
+    const raw = fs.readFileSync(MEMORY_FILE, "utf8");
+    return JSON.parse(raw || "{}");
+  } catch (e) {
+    return {};
+  }
+}
 
+function writeMemory(data) {
+  fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
+}
+
+app.get("/memory/:key", (req, res) => {
+  try {
+    const data = readMemory();
+    res.json({ value: data[req.params.key] || null });
+  } catch (err) {
+    console.error("Erreur /memory GET:", err);
+    res.status(500).json({ error: "Erreur lecture memory." });
+  }
+});
+
+app.post("/memory/:key", (req, res) => {
+  try {
+    const data = readMemory();
+    data[req.params.key] = req.body.value;
+    writeMemory(data);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Erreur /memory POST:", err);
+    res.status(500).json({ error: "Erreur ecriture memory." });
+  }
+});
+
+app.delete("/memory/:key/:id", (req, res) => {
+  try {
+    const data = readMemory();
+    const key = req.params.key;
+    const id = req.params.id;
+    if (Array.isArray(data[key])) {
+      data[key] = data[key].filter(item => item.id !== id);
+      writeMemory(data);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Erreur /memory DELETE:", err);
+    res.status(500).json({ error: "Erreur suppression memory." });
+  }
+});
 app.get("/config", (_req, res) => {
   res.set({ "Cache-Control": "no-store" });
   res.json({
